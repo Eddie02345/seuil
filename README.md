@@ -49,11 +49,14 @@ The wire format, message ids, and field layouts are documented in
 
 ## Requirements
 
-| Distribution | Packages |
-|---|---|
-| Arch | `bluez bluez-utils pipewire playerctl rust` |
-| Fedora | `bluez pipewire-utils playerctl cargo` |
-| Ubuntu | `bluez pulseaudio-utils playerctl cargo` |
+| Distribution | Runtime packages | Build packages |
+|---|---|---|
+| Arch | `bluez bluez-utils dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
+| Debian / Ubuntu | `bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3` | `build-essential pkg-config libdbus-1-dev libssl-dev` |
+| Fedora | `bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
+
+Runtime packages are enough for the prebuilt binaries. Source builds also need
+the build packages; the per-distribution commands below include both.
 
 Seuil also needs the `bluer` crate's BlueZ backend, which is built from source
 by Cargo.
@@ -90,6 +93,58 @@ seuil setup
 AUR publishing (`paru -S seuil`, `yay -S seuil`) is queued until new AUR
 account registration reopens. The package recipe in `packaging/aur` is already
 ready and builds the same binary the release asset contains.
+
+### Debian / Ubuntu
+
+Run these commands on recent Debian or Ubuntu (22.04+).
+
+#### Prebuilt binary (no Rust toolchain)
+
+```sh
+sudo apt update && sudo apt install -y bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3
+mkdir -p ~/.local/bin
+curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
+~/.local/bin/seuil setup
+```
+
+Substitute the latest tag from the
+[releases page](https://github.com/Eddie02345/seuil/releases) if it is not
+`v1.0.0`.
+
+#### Build from source via `./install.sh`
+
+```sh
+sudo apt update && sudo apt install -y build-essential pkg-config libdbus-1-dev libssl-dev bluez pipewire pipewire-bin pipewire-pulse playerctl curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/Eddie02345/seuil.git
+cd seuil
+./install.sh
+```
+
+Installing Rust with `rustup` is recommended on Debian/Ubuntu: the distro
+`cargo` package is often too old for current crates.
+
+### Fedora
+
+#### Prebuilt binary (no Rust toolchain)
+
+```sh
+sudo dnf install -y bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
+mkdir -p ~/.local/bin
+curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
+~/.local/bin/seuil setup
+```
+
+#### Build from source via `./install.sh`
+
+```sh
+sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez pipewire pipewire-utils pipewire-pulseaudio playerctl
+git clone https://github.com/Eddie02345/seuil.git
+cd seuil
+./install.sh
+```
 
 ### First-run setup
 
