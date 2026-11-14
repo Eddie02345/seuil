@@ -96,14 +96,24 @@ enum Commands {
         #[arg(long)]
         reauth: bool,
     },
+
+    /// Receive the ms-app:// OAuth callback from the browser
+    #[command(hide = true)]
+    AuthCallback {
+        /// Callback URL handed over by the desktop entry
+        url: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
-    if let Some(Commands::Setup { reauth }) = cli.command {
-        return setup::run(&cli, reauth).await;
+    if let Some(Commands::Setup { reauth }) = cli.command.as_ref() {
+        return setup::run(&cli, *reauth).await;
+    }
+    if let Some(Commands::AuthCallback { url }) = cli.command.as_ref() {
+        return auth::browser::send_callback(url).await;
     }
     let file_config = config::load();
     if cli.phone.is_empty() {

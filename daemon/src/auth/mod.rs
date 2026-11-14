@@ -7,6 +7,7 @@
 //! enrollment that yields the account key used by the BLE/LAN handshake.
 
 pub mod ble_keys;
+pub mod browser;
 mod credentials;
 pub mod crypto;
 pub mod handshake;
@@ -14,7 +15,7 @@ pub mod handshake;
 pub use credentials::{Credentials, data_path as credentials_path};
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -32,9 +33,9 @@ const MASTER_CLIENT_ID: &str = "yfrtglt53o";
 const CONTINUITY_CLIENT_ID: &str = "boz0m1awhe";
 const APP_VERSION: &str = "4.6.1217.0";
 const DEFAULT_AUTH_SERVER: &str = "eu-auth2.samsungosp.com";
-/// Windows app callback registered for Samsung's PC SDK client. Linux has no
-/// handler for it, so the callback URL is pasted back unless
-/// `MCFDS_OAUTH_REDIRECT` names a loopback listener.
+/// Windows app callback registered for Samsung's PC SDK client. `seuil setup`
+/// registers a temporary Linux handler for it; otherwise the callback URL is
+/// pasted back unless `MCFDS_OAUTH_REDIRECT` names a loopback listener.
 const DEFAULT_REDIRECT: &str =
     "ms-app://s-1-15-2-4027708247-2189610-1983755848-2937435718-1578786913-2158692839-1974417358";
 const DEVICE_NAME: &str = "seuil";
@@ -676,21 +677,67 @@ impl SamsungOAuth {
     }
 
     async fn await_pasted_callback(&self, sign_in_uri: &str) -> Result<String> {
+        let registration = match browser::CallbackRegistration::install() {
+            Ok(registration) => Some(registration),
+            Err(error) => {
+                eprintln!(
+                    "warning: could not register the ms-app:// callback: {error}"
+                );
+                None
+            }
+        };
+
         eprintln!(
-            "After signing in, the browser may fail to open the ms-app:// callback.\n\
-             Copy the complete URL from the address bar, paste it here, and press Enter."
+            "\nSign-in continues in your browser.\n\
+             If the page keeps loading after you sign in, the browser could not hand the\n\
+             ms-app:// redirect to Seuil. Either:\n\
+               - choose \"Open\" when the browser asks for \"Seuil Auth Callback\", or\n\
+               - open the browser console (Ctrl+Shift+K in Firefox, Ctrl+Shift+J in\n\
+                 Chrome/Chromium), copy the complete ms-app://... URL it prints, paste it\n\
+                 here, and press Enter.\n\
+             Firefox may log \"Prevented navigation ... unknown protocol\"; that is normal\n\
+             when it has no handler for ms-app://, and the URL in that message still works."
         );
         open_browser(sign_in_uri).await;
-        let read = tokio::task::spawn_blocking(read_stdin_line);
-        tokio::time::timeout(CALLBACK_TIMEOUT, read)
-            .await
-            .map_err(|_| AuthError::Protocol("Samsung sign-in callback timed out".into()))?
-            .map_err(|e| AuthError::Protocol(format!("could not read callback URL: {e}")))?
+
+        let stdin = read_stdin_line();
+        let socket = async {
+            match registration.as_ref() {
+                Some(registration) => registration.receive().await.map_err(|error| {
+                    AuthError::Protocol(format!("browser callback failed: {error}"))
+                }),
+                None => std::future::pending::<Result<String>>().await,
+            }
+        };
+
+        let raw = tokio::time::timeout(CALLBACK_TIMEOUT, async {
+            tokio::select! {
+                received = socket => received,
+                line = stdin => match line {
+                    Some(line) => Ok(line),
+                    None => Err(AuthError::Protocol(
+                        "the terminal input closed before a callback URL was pasted".into(),
+                    )),
+                },
+                _ = tokio::signal::ctrl_c() => Err(AuthError::Protocol(
+                    "Samsung sign-in cancelled".into(),
+                )),
+            }
+        })
+        .await
+        .map_err(|_| AuthError::Protocol("Samsung sign-in callback timed out".into()))??;
+
+        let url = normalize_callback_input(&raw);
+        if url.is_empty() {
+            return Err(AuthError::Protocol(
+                "no Samsung callback URL was provided".into(),
+            ));
+        }
+        Ok(url)
     }
 
     fn parse_callback(&self, raw: &str) -> Result<AuthCallback> {
-        let url = Url::parse(raw)
-            .map_err(|e| AuthError::Protocol(format!("invalid Samsung callback URL: {e}")))?;
+        let url = parse_callback_url(raw)?;
         let mut items: Vec<(String, String)> = url
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -702,27 +749,20 @@ impl SamsungOAuth {
             );
         }
         let field = |name: &str| -> Result<String> {
-            let mut values = items
-                .iter()
-                .filter(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str());
-            let first = values
-                .next()
-                .ok_or_else(|| AuthError::Protocol(format!("Samsung sign-in omitted {name}")))?;
-            if values.next().is_some() || first.is_empty() {
-                return Err(AuthError::Protocol(format!(
-                    "Samsung sign-in returned a duplicate or empty {name}"
-                )));
-            }
-            Ok(first.to_string())
+            first_nonempty(&items, name)
+                .ok_or_else(|| AuthError::Protocol(format!("Samsung sign-in omitted {name}")))
         };
 
-        let response_key = crypto::callback_decrypt(&field("state")?, &self.state)?;
-        if response_key.is_empty() {
-            return Err(AuthError::Protocol(
-                "Samsung sign-in returned an empty callback key".into(),
-            ));
-        }
+        // Samsung appends a second `state=new` marker after the encrypted state,
+        // so try each value until one decrypts instead of rejecting duplicates.
+        let response_key = items
+            .iter()
+            .filter(|(key, value)| key == "state" && !value.is_empty())
+            .find_map(|(_, value)| crypto::callback_decrypt(value, &self.state).ok())
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| {
+                AuthError::Protocol("Samsung sign-in returned an unreadable state".into())
+            })?;
         let server = normalize_secure_server(
             crypto::callback_decrypt(&field("auth_server_url")?, &response_key)?.trim(),
         )?;
@@ -1062,16 +1102,61 @@ async fn open_browser(url: &str) {
     }
 }
 
-fn read_stdin_line() -> Result<String> {
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        return Err(AuthError::Protocol(
-            "no Samsung callback URL was provided".into(),
-        ));
-    }
-    Ok(line)
+/// Strips whitespace and the quotes browsers add when copying a URL from the
+/// DevTools console or showing it in a dialog. When the whole console line is
+/// pasted, extracts the `ms-app://` URL from the surrounding text.
+pub(crate) fn normalize_callback_input(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let candidate = trimmed
+        .find("ms-app://")
+        .map(|index| &trimmed[index..])
+        .unwrap_or(trimmed);
+    candidate
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’'))
+        .to_string()
+}
+
+/// First non-empty value for a query or fragment field.
+fn first_nonempty(items: &[(String, String)], name: &str) -> Option<String> {
+    items
+        .iter()
+        .find(|(key, value)| key == name && !value.is_empty())
+        .map(|(_, value)| value.clone())
+}
+
+fn parse_callback_url(raw: &str) -> Result<Url> {
+    let normalized = normalize_callback_input(raw);
+    Url::parse(&normalized)
+        .map_err(|e| AuthError::Protocol(format!("invalid Samsung callback URL: {e}")))
+}
+
+/// One shared stdin reader for every prompt. Keeping a single reader avoids a
+/// background read stealing the line the user types into the next prompt.
+static STDIN_LINES: LazyLock<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>> =
+    LazyLock::new(|| {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        std::thread::spawn(move || {
+            loop {
+                let mut line = String::new();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if tx.blocking_send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        tokio::sync::Mutex::new(rx)
+    });
+
+/// Reads one line from the shared stdin reader.
+pub(crate) async fn read_stdin_line() -> Option<String> {
+    STDIN_LINES.lock().await.recv().await
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1114,5 +1199,102 @@ mod tests {
     fn masked_keeps_last_four_characters() {
         assert_eq!(masked("user@example.com"), "***.com");
         assert_eq!(masked("abc"), "***");
+    }
+
+    #[test]
+    fn callback_url_strips_console_quotes_and_whitespace() {
+        let expected = "ms-app://s-1-15-2-4027708247/?state=abc&code=def&auth_server_url=eu-auth2.samsungosp.com";
+        let cases = [
+            expected.to_string(),
+            format!("  {expected}  \n"),
+            format!("\"{expected}\""),
+            format!("“{expected}”"),
+            format!("  \"{expected}\"  \r\n"),
+            format!("'{expected}'"),
+            format!("\n\t“{expected}”\n"),
+        ];
+        for raw in cases {
+            assert_eq!(normalize_callback_input(&raw), expected);
+            let url = parse_callback_url(&raw).unwrap();
+            assert_eq!(url.scheme(), "ms-app");
+            assert_eq!(url.host_str(), Some("s-1-15-2-4027708247"));
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == "code")
+                    .map(|(_, value)| value.into_owned()),
+                Some("def".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn callback_input_rejects_blank_lines() {
+        assert_eq!(normalize_callback_input("   \r\n"), "");
+        assert_eq!(normalize_callback_input("\"\"\n"), "");
+        assert!(parse_callback_url("  \n").is_err());
+    }
+
+    #[test]
+    fn callback_input_extracts_the_url_from_a_firefox_console_line() {
+        let expected =
+            "ms-app://s-1-15-2-4027708247/?code=abc&state=encrypted&state=new";
+        let line = format!(
+            "Prevented navigation to “{expected}” due to an unknown protocol."
+        );
+        assert_eq!(normalize_callback_input(&line), expected);
+        assert_eq!(parse_callback_url(&line).unwrap().scheme(), "ms-app");
+    }
+
+    #[test]
+    fn duplicate_callback_fields_use_the_first_non_empty_value() {
+        let items = vec![
+            ("state".to_string(), "encrypted".to_string()),
+            ("state".to_string(), "new".to_string()),
+            ("code".to_string(), String::new()),
+            ("code".to_string(), "value".to_string()),
+        ];
+        assert_eq!(
+            first_nonempty(&items, "state").as_deref(),
+            Some("encrypted")
+        );
+        assert_eq!(first_nonempty(&items, "code").as_deref(), Some("value"));
+        assert_eq!(first_nonempty(&items, "missing"), None);
+    }
+
+    #[test]
+    fn parse_callback_ignores_samsung_state_new_marker() {
+        use aes::cipher::{BlockEncrypt, KeyInit};
+
+        fn encrypt(value: &str, key: &str) -> String {
+            let mut secret = [0u8; 16];
+            for (slot, byte) in secret.iter_mut().zip(key.as_bytes()) {
+                *slot = *byte;
+            }
+            let cipher = aes::Aes128::new_from_slice(&secret).unwrap();
+            let mut data = value.as_bytes().to_vec();
+            let pad = 16 - data.len() % 16;
+            data.resize(data.len() + pad, pad as u8);
+            for block in data.as_chunks_mut::<16>().0 {
+                cipher.encrypt_block(block.into());
+            }
+            hex::encode(data)
+        }
+
+        let oauth = SamsungOAuth::new("eu-auth2.samsungosp.com").unwrap();
+        let response_key = "response-key-123";
+        let state = encrypt(response_key, &oauth.state);
+        let server = encrypt("eu-auth2.samsungosp.com", response_key);
+        let code = encrypt("test-code", response_key);
+        let login_id = encrypt("user@example.com", response_key);
+        let raw = format!(
+            "ms-app://s-1-15-2-1/?code={code}&state={state}&auth_server_url={server}\
+             &retValue={login_id}&code_expires_in=300&state=new"
+        );
+
+        let callback = oauth.parse_callback(&raw).unwrap();
+        assert_eq!(callback.code, "test-code");
+        assert_eq!(callback.auth_server_url, "https://eu-auth2.samsungosp.com");
+        assert_eq!(callback.login_id, "user@example.com");
+        assert_eq!(callback.state, oauth.state);
     }
 }

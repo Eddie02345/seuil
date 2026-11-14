@@ -4,7 +4,7 @@
 //! BlueZ paired devices for the user to pick from, writes the config, and
 //! installs and starts the systemd user unit.
 
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -87,8 +87,19 @@ pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
 
     let phone_default = devices.iter().position(|d| d.role == Role::Phone);
     let buds_default = devices.iter().position(|d| d.role == Role::Buds);
-    let phone_index = prompt_index("Phone number", phone_default, devices.len())?;
-    let buds_index = prompt_index("Buds number", buds_default, devices.len())?;
+    println!("\nEnter a list number, or press Enter to accept the default.");
+    let phone_index = prompt_index(
+        "Select the phone by list number",
+        phone_default,
+        devices.len(),
+    )
+    .await?;
+    let buds_index = prompt_index(
+        "Select the Buds by list number",
+        buds_default,
+        devices.len(),
+    )
+    .await?;
     if phone_index == buds_index {
         anyhow::bail!("the phone and the Buds must be different devices");
     }
@@ -181,17 +192,16 @@ async fn paired_devices(adapter_name: &str) -> Result<Vec<PairedDevice>> {
 }
 
 /// Reads a 1-based list number, defaulting to `suggested` on an empty line.
-fn prompt_index(label: &str, suggested: Option<usize>, len: usize) -> Result<usize> {
+async fn prompt_index(label: &str, suggested: Option<usize>, len: usize) -> Result<usize> {
     loop {
         match suggested {
-            Some(index) => print!("{label} [{}]: ", index + 1),
+            Some(index) => print!("{label} (1-{len}) [default {}]: ", index + 1),
             None => print!("{label} (1-{len}): "),
         }
-        io::stdout().flush()?;
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line)? == 0 {
+        std::io::stdout().flush()?;
+        let Some(line) = crate::auth::read_stdin_line().await else {
             anyhow::bail!("no input available; pass the MACs with flags or config.toml");
-        }
+        };
         let line = line.trim();
         if line.is_empty() {
             if let Some(index) = suggested {
