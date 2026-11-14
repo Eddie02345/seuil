@@ -158,6 +158,23 @@ The wizard (`seuil setup`, `seuil setup --reauth`):
    `~/.config/systemd/user/seuil.service`, reloads systemd, and enables and
    starts the service.
 
+### Completing the Samsung Account sign-in on Linux
+
+If the browser stays on a loading spinner after you sign in at
+`account.samsung.com`, the login succeeded. Samsung then redirects the browser
+to its Windows callback URI (`ms-app://...`), which Linux browsers block. The
+DevTools console logs `Prevented navigation to "ms-app://..."`. Paste that
+callback URL back into `seuil setup`:
+
+1. Open DevTools Console on that tab: `Ctrl + Shift + K` in Firefox,
+   `Ctrl + Shift + J` in Chrome, Chromium, or Brave.
+2. Find the `Prevented navigation to "ms-app://s-1-15-2-..."` warning. Press
+   `Ctrl + R` if the 5-minute code expired; that loads a fresh link.
+3. Copy the full `ms-app://...` URL without the surrounding quotes.
+4. Click back into the terminal running `seuil setup`, paste with
+   `Ctrl + Shift + V`, and press `Enter`. Do not paste it into the browser
+   address bar.
+
 Both devices must be paired in `bluetoothctl` first, and you need a Samsung
 account.
 
