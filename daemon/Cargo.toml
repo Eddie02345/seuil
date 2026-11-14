@@ -1,0 +1,62 @@
+[package]
+name = "seuil"
+version = "0.1.0"
+edition = "2024"
+description = "Seuil: pass Galaxy Buds audio between a Samsung phone and Linux over Samsung Continuity"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Eddie02345/seuil"
+readme = "../README.md"
+
+[dependencies]
+# Bluetooth
+bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
+# D-Bus
+zbus = { version = "5", features = ["tokio"] }
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Byte manipulation
+byteorder = "1.5"
+# MPRIS
+mpris = "2.0"
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Error handling
+anyhow = "1"
+thiserror = "2"
+# UUID
+uuid = { version = "1", features = ["v4"] }
+# Hex encoding
+hex = "0.4"
+# Pipewire (optional, for audio stream detection)
+# pipewire = "0.8"
+# Async trait
+async-trait = "0.1"
+# Futures
+futures = "0.3"
+# Samsung account sign-in and cloud APIs
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2.5"
+open = "5"
+# Continuity handshake protobuf and P-256 ECDH
+prost = "0.12"
+p256 = { version = "0.13", features = ["ecdh", "pem"] }
+# Samsung sign-in envelope crypto (PBKDF2, AES-CBC, RSA PKCS#1 v1.5)
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+rsa = { version = "0.9", features = ["sha2"] }
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-test = "0.4"

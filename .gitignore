@@ -1,0 +1,48 @@
+# Rust build artifacts
+target/
+daemon/target/
+
+# Proprietary Samsung artifacts (never distributed)
+samsung-autoswitch-re/
+*.apk
+*.odex
+*.vdex
+*.dex
+*.baksmali
+decompiled/
+.research/
+analysis/jadx-fallback/
+__pycache__/
+*.pyc
+
+# Credentials and runtime captures (must never be committed)
+credentials.json
+credentials.key
+.env
+*.btsnoop
+*.btsnoop_hci.log
+*.snoop
+*.pcap
+*.cap
+
+# Local runtime data
+*.log
+*.snoop
+/tmp/
+*.orig
+*.rej
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local plans, agent workspaces, and AI assistant files
+.agent/
+.opencode/
+AGENTS.md
+CLAUDE.md
+FIX_PLAN.md
