@@ -49,11 +49,11 @@ struct Cli {
     buds: String,
 
     /// Bluetooth adapter name (default: hci0)
-    #[arg(long, default_value = "hci0")]
+    #[arg(long, default_value = "hci0", global = true)]
     adapter: String,
 
     /// Enable debug logging
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     debug: bool,
 
     /// Dry-run mode (scan and log only, no handoff actions)
@@ -79,11 +79,11 @@ struct Cli {
     auth_refresh: bool,
 
     /// Samsung account auth server host (regional)
-    #[arg(long, default_value = "eu-auth2.samsungosp.com")]
+    #[arg(long, default_value = "eu-auth2.samsungosp.com", global = true)]
     auth_server: String,
 
     /// Local Bluetooth address to enroll (default: adapter sysfs address)
-    #[arg(long)]
+    #[arg(long, global = true)]
     bt_address: Option<String>,
 }
 
@@ -108,6 +108,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
+    init_logging(&cli);
 
     if let Some(Commands::Setup { reauth }) = cli.command.as_ref() {
         return setup::run(&cli, *reauth).await;
@@ -130,14 +131,6 @@ async fn main() -> Result<()> {
             cli.adapter = adapter;
         }
     let discover_buds = file_config.discover;
-
-    // Initialize logging
-    let filter = if cli.debug {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::new("info")
-    };
-    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     if cli.auth_login || cli.auth_refresh {
         return run_auth(&cli).await;
@@ -425,6 +418,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn init_logging(cli: &Cli) {
+    let filter = if cli.debug {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
 async fn run_auth(cli: &Cli) -> Result<()> {
     let stored = auth::Credentials::load()?;
     if cli.auth_refresh && stored.is_none() {
@@ -436,19 +438,19 @@ async fn run_auth(cli: &Cli) -> Result<()> {
         None => auth::SamsungOAuth::new(&cli.auth_server)?,
     };
 
-    let address = cli
-        .bt_address
-        .clone()
-        .or_else(|| read_adapter_address(&cli.adapter))
-        .or_else(|| {
+    let address = match cli.bt_address.clone() {
+        Some(address) => Some(address),
+        None => read_adapter_address(&cli.adapter).await.or_else(|| {
             stored
                 .as_ref()
                 .map(|stored| stored.bt_address.clone())
                 .filter(|address| !address.is_empty())
-        });
+        }),
+    };
     let Some(address) = address else {
         anyhow::bail!(
-            "could not read the address of {}; pass --bt-address",
+            "could not read the address of {}; pass --bt-address XX:XX:XX:XX:XX:XX, \
+             for example `seuil setup --bt-address XX:XX:XX:XX:XX:XX`",
             cli.adapter
         );
     };
@@ -516,7 +518,7 @@ async fn run_auth(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn read_adapter_address(adapter: &str) -> Option<String> {
+async fn read_adapter_address(adapter: &str) -> Option<String> {
     // Try sysfs first
     let path = format!("/sys/class/bluetooth/{adapter}/address");
     if let Ok(address) = std::fs::read_to_string(&path) {
@@ -525,21 +527,31 @@ fn read_adapter_address(adapter: &str) -> Option<String> {
             return Some(address);
         }
     }
-    
+
+    // BlueZ exposes the adapter address even when sysfs does not.
+    if let Ok(session) = bluer::Session::new().await
+        && let Ok(adapter) = session.adapter(adapter)
+        && let Ok(address) = adapter.address().await
+    {
+        return Some(address.to_string());
+    }
+
     // Fallback to hciconfig
     if let Ok(output) = std::process::Command::new("hciconfig")
         .arg(adapter)
         .output()
-        && output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("BD Address")
-                    && let Some(addr) = line.split_whitespace().nth(2) {
-                        return Some(addr.to_string());
-                    }
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains("BD Address")
+                && let Some(addr) = line.split_whitespace().nth(2)
+            {
+                return Some(addr.to_string());
             }
         }
-    
+    }
+
     tracing::debug!(adapter, "Could not read adapter address");
     None
 }
@@ -1099,10 +1111,8 @@ async fn handle_action(action: HandoffAction, dry_run: &bool) {
             info!("Phone should now connect to Buds");
         }
         HandoffAction::ClaimBuds => {
-            info!("=== HANDOFF: Linux claiming Buds ===");
-            // TODO: Send CONTINUITY_MSG_SPP handoff command to phone
-            // TODO: Connect A2DP to Buds
-            info!("Connecting A2DP to Buds...");
+            info!("=== HANDOFF: Linux requested the Buds ===");
+            debug!("The phone's BudsSwitchResponse triggers the A2DP pull to Linux");
         }
         HandoffAction::PhoneReady => {
             info!("Phone is ready for Linux to take over");

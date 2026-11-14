@@ -76,7 +76,17 @@ pub async fn query_remote_sdp(address: &str) -> Result<Vec<SdpRecord>> {
     let output = tokio::process::Command::new("sdptool")
         .args(["browse", address])
         .output()
-        .await?;
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "`sdptool` is not installed; install bluez-deprecated-tools on Arch, \
+                     bluez on Debian/Ubuntu, or bluez-deprecated on Fedora"
+                )
+            } else {
+                anyhow::Error::new(error).context(format!("run sdptool browse {address}"))
+            }
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut records = Vec::new();
