@@ -23,6 +23,7 @@ use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
 use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
@@ -44,6 +45,109 @@ const DEVICE_MODEL: &str = "PC";
 const DEVICE_OS_VERSION: &str = "11";
 const COUNTRY_CODE: &str = "fr";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(900);
+const MACHINE_ID_PATH: &str = "/etc/machine-id";
+
+/// Derives a stable installation id unique to this Linux machine.
+///
+/// Samsung keys a Continuity registration by the installation identity. A
+/// process-random value collides when the same Samsung account enrolls two
+/// Linux PCs, so the id comes from `/etc/machine-id` plus the hostname. Both
+/// parts are hashed so the raw machine id is never sent to Samsung.
+pub(crate) fn machine_device_id_from(
+    machine_id: Option<&str>,
+    hostname: Option<&str>,
+) -> String {
+    let machine_id = machine_id.map(str::trim).filter(|value| !value.is_empty());
+    let hostname = hostname.map(str::trim).filter(|value| !value.is_empty());
+    if machine_id.is_none() && hostname.is_none() {
+        return hex::encode(crypto::random_bytes(16));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"seuil-device-id-v1");
+    hasher.update([0]);
+    if let Some(machine_id) = machine_id {
+        hasher.update(machine_id.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(hostname) = hostname {
+        hasher.update(hostname.to_ascii_lowercase().as_bytes());
+    }
+    hex::encode(&hasher.finalize()[..16])
+}
+
+fn machine_device_id() -> String {
+    let machine_id = std::fs::read_to_string(MACHINE_ID_PATH).ok();
+    let hostname = read_hostname();
+    machine_device_id_from(machine_id.as_deref(), hostname.as_deref())
+}
+
+/// Resolves the installation id, preferring values that are already persisted.
+///
+/// Credentials win because they identify the active Samsung registration.
+/// `config.toml` is the fallback for a setup that has not enrolled yet.
+/// Credentials written by older releases therefore keep their random id, which
+/// prevents an upgrade from registering the machine again under a new identity.
+pub(crate) fn stable_device_id() -> String {
+    let configured = crate::config::load().device_id;
+    let stored = Credentials::load()
+        .ok()
+        .flatten()
+        .map(|credentials| credentials.device_id);
+    resolve_device_id(
+        stored.as_deref(),
+        configured.as_deref(),
+        machine_device_id(),
+    )
+}
+
+fn resolve_device_id(stored: Option<&str>, configured: Option<&str>, derived: String) -> String {
+    [stored, configured]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or(derived)
+}
+
+/// Reads the system hostname without forking a process.
+fn read_hostname() -> Option<String> {
+    if let Some(hostname) = std::env::var_os("HOSTNAME") {
+        let hostname = hostname.to_string_lossy();
+        if !hostname.trim().is_empty() {
+            return Some(hostname.trim().to_string());
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|hostname| hostname.trim().to_string())
+        .filter(|hostname| !hostname.is_empty())
+}
+
+/// Human-readable device name shown in the Samsung account's device list.
+fn device_name() -> String {
+    let Some(hostname) = read_hostname() else {
+        return DEVICE_NAME.to_string();
+    };
+    let cleaned: String = hostname
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(48)
+        .collect();
+    let cleaned = cleaned.trim_matches('-');
+    if cleaned.is_empty() {
+        DEVICE_NAME.to_string()
+    } else {
+        format!("{DEVICE_NAME}-{cleaned}")
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -117,6 +221,7 @@ pub struct SamsungOAuth {
     refresh_token: Option<String>,
     master_client_id: String,
     device_id: String,
+    device_name: String,
     user_id: Option<String>,
     login_id: Option<String>,
     access_expires: i64,
@@ -155,7 +260,8 @@ impl SamsungOAuth {
             access_token: None,
             refresh_token: None,
             master_client_id: MASTER_CLIENT_ID.to_string(),
-            device_id: hex::encode(crypto::random_bytes(16)),
+            device_id: stable_device_id(),
+            device_name: device_name(),
             user_id: None,
             login_id: None,
             access_expires: 0,
@@ -254,7 +360,7 @@ impl SamsungOAuth {
             "countryCode": COUNTRY_CODE,
             "deviceInfo": "Google|com.android.chrome",
             "deviceModelID": DEVICE_MODEL,
-            "deviceName": DEVICE_NAME,
+            "deviceName": self.device_name,
             "deviceOSVersion": DEVICE_OS_VERSION,
             "devicePhysicalAddressText": format!("MAC:{}", self.device_id),
             "deviceType": "APP",
@@ -390,7 +496,7 @@ impl SamsungOAuth {
                 "countryCode": "FRA",
                 "modelName": DEVICE_MODEL,
                 "modelCode": DEVICE_MODEL,
-                "alias": DEVICE_NAME,
+                "alias": self.device_name,
                 "osUserId": "0"
             }
         });
@@ -478,7 +584,7 @@ impl SamsungOAuth {
         let body = json!({
             "csr": csr,
             "device": {
-                "deviceName": DEVICE_NAME,
+                "deviceName": self.device_name,
                 "deviceModel": DEVICE_MODEL,
                 "modelCode": DEVICE_MODEL,
                 "deviceType": "pc",
@@ -1114,5 +1220,62 @@ mod tests {
     fn masked_keeps_last_four_characters() {
         assert_eq!(masked("user@example.com"), "***.com");
         assert_eq!(masked("abc"), "***");
+    }
+
+    #[test]
+    fn machine_device_id_is_stable_per_machine_and_hostname() {
+        let first = machine_device_id_from(Some("abc123\n"), Some("steamdeck"));
+        let again = machine_device_id_from(Some("abc123\n"), Some("steamdeck"));
+        assert_eq!(first, again);
+        assert_eq!(first.len(), 32);
+        assert!(first.chars().all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn machine_device_id_differs_between_pcs() {
+        let deck = machine_device_id_from(Some("deck-machine-id"), Some("steamdeck"));
+        let laptop = machine_device_id_from(Some("laptop-machine-id"), Some("thinkpad"));
+        assert_ne!(deck, laptop);
+        let renamed = machine_device_id_from(Some("deck-machine-id"), Some("deck-desktop"));
+        assert_ne!(deck, renamed);
+    }
+
+    #[test]
+    fn machine_device_id_falls_back_to_the_hostname() {
+        let from_host = machine_device_id_from(None, Some("steamdeck"));
+        assert_eq!(from_host.len(), 32);
+        assert!(from_host.chars().all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn existing_credentials_keep_their_device_id() {
+        assert_eq!(
+            resolve_device_id(
+                Some("credential-id"),
+                Some("configured-id"),
+                "derived-id".into()
+            ),
+            "credential-id"
+        );
+    }
+
+    #[test]
+    fn configured_device_id_is_reused_without_credentials() {
+        assert_eq!(
+            resolve_device_id(None, Some("configured-id"), "derived-id".into()),
+            "configured-id"
+        );
+    }
+
+    #[test]
+    fn derives_a_device_id_when_nothing_is_persisted() {
+        assert_eq!(
+            resolve_device_id(None, None, "derived-id".into()),
+            "derived-id"
+        );
+        assert_eq!(
+            resolve_device_id(Some("  "), Some(""), "derived-id".into()),
+            "derived-id"
+        );
     }
 }

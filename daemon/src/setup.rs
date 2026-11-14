@@ -5,14 +5,14 @@
 //! installs and starts the systemd user unit.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
-use crate::auth::Credentials;
+use crate::auth::{self, Credentials};
 use crate::{config, Cli};
 
 /// Systemd unit name, also the service name.
@@ -64,6 +64,15 @@ fn classify(class: Option<u32>, name: &str) -> Role {
 pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
     println!("Seuil setup");
 
+    // Install the user-facing entry points first so a setup that stops before
+    // device selection still leaves the Desktop shortcut and PATH entry.
+    ensure_user_path()?;
+    install_desktop_shortcut()?;
+
+    // Pin the Samsung installation id before enrollment so later runs and
+    // hostname changes reuse the same identity.
+    let device_id = auth::stable_device_id();
+
     ensure_enrolled(cli, reauth).await?;
 
     let devices = paired_devices(&cli.adapter).await?;
@@ -100,7 +109,7 @@ pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
         .with_context(|| format!("create {}", dir.display()))?;
     let config_path = dir.join("config.toml");
     let text = format!(
-        "# Seuil configuration\nphone_mac = \"{phone}\"\nbuds_mac = \"{buds}\"\n# adapter = \"{}\"\n# discover = true\n",
+        "# Seuil configuration\ndevice_id = \"{device_id}\"\nphone_mac = \"{phone}\"\nbuds_mac = \"{buds}\"\n# adapter = \"{}\"\n# discover = true\n",
         cli.adapter
     );
     std::fs::write(&config_path, text)
@@ -212,10 +221,10 @@ fn install_service() -> Result<()> {
     if let Some(parent) = unit_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&unit_path, unit_text())
+    let bin = service_binary();
+    std::fs::write(&unit_path, unit_text(&bin))
         .with_context(|| format!("write {}", unit_path.display()))?;
 
-    let bin = home_dir()?.join(".local/bin/seuil");
     if !bin.exists() {
         println!(
             "warning: {} is missing; run ./install.sh first",
@@ -236,9 +245,36 @@ pub fn unit_path() -> Result<PathBuf> {
         .unwrap_or_else(|| PathBuf::from(SERVICE)))
 }
 
+/// The binary the user unit should launch.
+///
+/// Prefer the running executable so a `/usr/local/bin` or `~/.local/bin`
+/// install points at itself. `cargo run` from a build directory falls back to
+/// the regular user-space location.
+pub fn service_binary() -> PathBuf {
+    let fallback = home_dir()
+        .map(|home| home.join(".local/bin/seuil"))
+        .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/seuil"));
+    let Ok(executable) = std::env::current_exe() else {
+        return fallback;
+    };
+    let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
+    if executable
+        .components()
+        .any(|component| component.as_os_str() == "target")
+    {
+        return fallback;
+    }
+    if executable.is_file() {
+        executable
+    } else {
+        fallback
+    }
+}
+
 /// Contents of the user unit.
-pub fn unit_text() -> String {
-    "[Unit]\n\
+pub fn unit_text(bin: &Path) -> String {
+    format!(
+        "[Unit]\n\
          Description=Seuil Samsung Continuity daemon (Galaxy Buds Auto Switch)\n\
          After=pipewire.service bluetooth.target\n\
          Wants=pipewire.service\n\
@@ -246,14 +282,107 @@ pub fn unit_text() -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart=%h/.local/bin/seuil\n\
+         ExecStart={}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          Environment=RUST_LOG=info\n\
          ExecStartPre=-/usr/bin/bluetoothctl show\n\
          \n\
          [Install]\n\
-         WantedBy=default.target\n".to_string()
+         WantedBy=default.target\n",
+        bin.display()
+    )
+}
+
+/// Adds `~/.local/bin` to `~/.bashrc` when it is not already on PATH.
+fn ensure_user_path() -> Result<()> {
+    let home = home_dir()?;
+    if !service_binary().starts_with(&home) {
+        return Ok(());
+    }
+    let bashrc = home.join(".bashrc");
+    let existing = std::fs::read_to_string(&bashrc).unwrap_or_default();
+    if !path_entry_missing(&existing) {
+        return Ok(());
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&bashrc)
+        .with_context(|| format!("open {}", bashrc.display()))?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(file)?;
+    }
+    writeln!(
+        file,
+        "\n# Added by Seuil\n\
+         if [[ \":$PATH:\" != *\":$HOME/.local/bin:\"* ]]; then\n\
+         \x20   export PATH=\"$HOME/.local/bin:$PATH\"\n\
+         fi"
+    )?;
+    println!("Added ~/.local/bin to PATH in {}", bashrc.display());
+    Ok(())
+}
+
+/// True when no line already exports `~/.local/bin` on PATH.
+fn path_entry_missing(bashrc: &str) -> bool {
+    !bashrc.lines().any(|line| {
+        line.contains("PATH") && (line.contains("$HOME/.local/bin") || line.contains("${HOME}/.local/bin"))
+    })
+}
+
+/// Installs the Desktop Mode launcher used on SteamOS and other user installs.
+fn install_desktop_shortcut() -> Result<()> {
+    let bin = service_binary();
+    let home = home_dir()?;
+    if !is_steamos() && !bin.starts_with(&home) {
+        return Ok(());
+    }
+
+    let desktop = home.join("Desktop");
+    std::fs::create_dir_all(&desktop)
+        .with_context(|| format!("create {}", desktop.display()))?;
+    let path = desktop.join("Seuil Setup.desktop");
+    std::fs::write(&path, desktop_entry_text(&bin))
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    println!("Installed the setup shortcut at {}", path.display());
+    Ok(())
+}
+
+/// Contents of the Steam Deck / SteamOS setup launcher.
+pub fn desktop_entry_text(bin: &Path) -> String {
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Version=1.0\n\
+         Name=Seuil Setup\n\
+         Comment=Pair the Samsung phone and Galaxy Buds with Seuil\n\
+         Exec=konsole --hold -e {} setup\n\
+         Terminal=false\n\
+         Icon=preferences-system-bluetooth\n\
+         Categories=Utility;\n",
+        bin.display()
+    )
+}
+
+/// True on SteamOS, detected from the image's os-release file.
+fn is_steamos() -> bool {
+    std::fs::read_to_string("/etc/os-release")
+        .map(|contents| {
+            contents.lines().any(|line| {
+                line.trim()
+                    .strip_prefix("ID=")
+                    .map(|value| value.trim().trim_matches('"') == "steamos")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn run_systemctl(args: &[&str]) -> Result<()> {
@@ -295,9 +424,36 @@ mod tests {
     }
 
     #[test]
-    fn unit_starts_the_rebranded_binary() {
-        let unit = unit_text();
-        assert!(unit.contains("ExecStart=%h/.local/bin/seuil"));
+    fn unit_starts_the_installed_binary() {
+        let bin = Path::new("/home/deck/.local/bin/seuil");
+        let unit = unit_text(bin);
+        assert!(unit.contains("ExecStart=/home/deck/.local/bin/seuil"));
         assert!(unit.contains("After=pipewire.service bluetooth.target"));
+    }
+
+    #[test]
+    fn unit_supports_system_wide_installs() {
+        let unit = unit_text(Path::new("/usr/local/bin/seuil"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/seuil"));
+    }
+
+    #[test]
+    fn desktop_entry_runs_the_setup_wizard_in_a_terminal() {
+        let entry = desktop_entry_text(Path::new("/home/deck/.local/bin/seuil"));
+        assert!(entry.contains("Exec=konsole --hold -e /home/deck/.local/bin/seuil setup"));
+        assert!(entry.contains("Terminal=false"));
+        assert!(entry.contains("Name=Seuil Setup"));
+    }
+
+    #[test]
+    fn path_entry_is_added_only_once() {
+        assert!(path_entry_missing(""));
+        assert!(path_entry_missing("export PATH=\"$HOME/bin:$PATH\"\n"));
+        assert!(!path_entry_missing(
+            "if [[ \":$PATH:\" != *\":$HOME/.local/bin:\"* ]]; then\n    export PATH=\"$HOME/.local/bin:$PATH\"\nfi\n"
+        ));
+        assert!(!path_entry_missing(
+            "export PATH=\"${HOME}/.local/bin:$PATH\"\n"
+        ));
     }
 }

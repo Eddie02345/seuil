@@ -19,6 +19,7 @@ mod protocol;
 mod rfcomm;
 mod sdp;
 mod setup;
+mod update;
 
 use anyhow::Result;
 use bluer::Adapter;
@@ -96,14 +97,22 @@ enum Commands {
         #[arg(long)]
         reauth: bool,
     },
+    /// Download and install the latest GitHub release over this binary
+    Update {
+        /// Reinstall the latest release even when it matches the installed version
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
-    if let Some(Commands::Setup { reauth }) = cli.command {
-        return setup::run(&cli, reauth).await;
+    match cli.command.take() {
+        Some(Commands::Setup { reauth }) => return setup::run(&cli, reauth).await,
+        Some(Commands::Update { force }) => return update::run(force).await,
+        None => {}
     }
     let file_config = config::load();
     if cli.phone.is_empty() {
