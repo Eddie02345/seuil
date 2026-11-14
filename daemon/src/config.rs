@@ -98,9 +98,7 @@ pub fn discover_phone(credentials: Option<&Credentials>) -> Option<String> {
             .or_else(|| {
                 credentials.devices.iter().find(|device| {
                     let kind = device.device_type.to_ascii_uppercase();
-                    device.bt_address.len() == 17
-                        && !kind.contains("PC")
-                        && !kind.contains("WATCH")
+                    device.bt_address.len() == 17 && !kind.contains("PC") && !kind.contains("WATCH")
                 })
             })
             .map(|device| device.bt_address.clone())

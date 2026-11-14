@@ -102,12 +102,12 @@ pub struct BleAdvEvent {
 /// Parse manufacturer specific data from a BLE advertisement.
 ///
 /// `keys` deobfuscates the LTV block so the type 1 CoC PSM can be read.
-pub fn parse_mcf_manufacturer_data(
-    data: &[u8],
-    keys: &BleKeyDerivation,
-) -> Option<ParsedMcfAdv> {
+pub fn parse_mcf_manufacturer_data(data: &[u8], keys: &BleKeyDerivation) -> Option<ParsedMcfAdv> {
     let header = BleHeader::parse(data)?;
-    debug!("Parsed header: version={:02x} subtype={:02x} flags={:02x}", header.version, header.subtype, header.flags);
+    debug!(
+        "Parsed header: version={:02x} subtype={:02x} flags={:02x}",
+        header.version, header.subtype, header.flags
+    );
 
     if header.version != BleHeader::EXPECTED_VERSION
         || header.subtype != BleHeader::EXPECTED_SUBTYPE
@@ -170,16 +170,27 @@ pub fn parse_mcf_manufacturer_data(
 /// The LTV block is XOR-obfuscated with the account's SHA-256 table, so the
 /// payload is deobfuscated on a copy before the records are walked.
 fn parse_coc_psm(data: &[u8], keys: &BleKeyDerivation) -> Option<u16> {
-    debug!("parse_coc_psm: keys.is_configured()={}, data.len()={}, LTV_START={}", keys.is_configured(), data.len(), LTV_START);
+    debug!(
+        "parse_coc_psm: keys.is_configured()={}, data.len()={}, LTV_START={}",
+        keys.is_configured(),
+        data.len(),
+        LTV_START
+    );
     if !keys.is_configured() || data.len() <= LTV_START {
         debug!("parse_coc_psm: early return - keys not configured or data too short");
         return None;
     }
 
     let mut clear = data.to_vec();
-    debug!("parse_coc_psm: before deobfuscate, data[16..20]={:02x?}", &clear[16..20.min(clear.len())]);
+    debug!(
+        "parse_coc_psm: before deobfuscate, data[16..20]={:02x?}",
+        &clear[16..20.min(clear.len())]
+    );
     keys.deobfuscate(&mut clear, &[]);
-    debug!("parse_coc_psm: after deobfuscate, data[16..20]={:02x?}", &clear[16..20.min(clear.len())]);
+    debug!(
+        "parse_coc_psm: after deobfuscate, data[16..20]={:02x?}",
+        &clear[16..20.min(clear.len())]
+    );
 
     let mut index = LTV_START;
     while index < clear.len() {
@@ -244,20 +255,26 @@ pub async fn start_ble_scan(
             let Ok(Some(mfg_data)) = device.manufacturer_data().await else {
                 continue;
             };
-            debug!("Got {} manufacturer data entries for {}", mfg_data.len(), addr);
+            debug!(
+                "Got {} manufacturer data entries for {}",
+                mfg_data.len(),
+                addr
+            );
             let Some(samsung_data) = mfg_data.get(&SAMSUNG_COMPANY_ID) else {
                 continue;
             };
-            debug!("Samsung data from {} ({} bytes): {}", addr, samsung_data.len(), hex::encode(samsung_data));
+            debug!(
+                "Samsung data from {} ({} bytes): {}",
+                addr,
+                samsung_data.len(),
+                hex::encode(samsung_data)
+            );
             let Some(parsed) = parse_mcf_manufacturer_data(samsung_data, &keys) else {
-            debug_log_adv(&addr.to_string(), samsung_data);
+                debug_log_adv(&addr.to_string(), samsung_data);
                 continue;
             };
 
-            let address_type = device
-                .address_type()
-                .await
-                .unwrap_or(AddressType::LePublic);
+            let address_type = device.address_type().await.unwrap_or(AddressType::LePublic);
             let rssi = device.rssi().await.unwrap_or(Some(-100)).unwrap_or(-100);
             let adv_event = BleAdvEvent {
                 address: addr.to_string(),
@@ -603,11 +620,25 @@ pub fn build_mcf_advertisement_with_account(
     tracing::info!("BLE advertisement: {} bytes", data.len());
     tracing::info!("  Hex: {}", hex::encode(&data));
     tracing::info!("  Checksum (byte 2): 0x{:02x}", data[2]);
-    tracing::info!("  BT address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", bt_address[0], bt_address[1], bt_address[2], bt_address[3], bt_address[4], bt_address[5]);
+    tracing::info!(
+        "  BT address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bt_address[0],
+        bt_address[1],
+        bt_address[2],
+        bt_address[3],
+        bt_address[4],
+        bt_address[5]
+    );
     if data.len() >= 22 {
-        tracing::info!("  Type 1 record (bytes 16..22): {}", hex::encode(&data[16..22]));
+        tracing::info!(
+            "  Type 1 record (bytes 16..22): {}",
+            hex::encode(&data[16..22])
+        );
     }
-    tracing::info!("  Fingerprint checksum matches: {}", key_derivation.checksum_matches(data[2]));
+    tracing::info!(
+        "  Fingerprint checksum matches: {}",
+        key_derivation.checksum_matches(data[2])
+    );
 
     data
 }
@@ -709,7 +740,12 @@ pub fn build_mcf_scan_response(
 // Debug: log raw advertisement data
 #[allow(dead_code)]
 fn debug_log_adv(address: &str, data: &[u8]) {
-    debug!("Raw MCF adv from {} ({} bytes): {}", address, data.len(), hex::encode(data));
+    debug!(
+        "Raw MCF adv from {} ({} bytes): {}",
+        address,
+        data.len(),
+        hex::encode(data)
+    );
 }
 
 #[cfg(test)]
@@ -794,8 +830,8 @@ mod tests {
         );
         let scan_keys = scanning_keys(Some(&FINGERPRINT));
 
-        let parsed = parse_mcf_manufacturer_data(&advertisement, &scan_keys)
-            .expect("advertisement parses");
+        let parsed =
+            parse_mcf_manufacturer_data(&advertisement, &scan_keys).expect("advertisement parses");
 
         assert_eq!(parsed.coc_psm, Some(COC));
     }

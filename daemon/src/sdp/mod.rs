@@ -167,16 +167,18 @@ async fn query_via_sdptool(address: &str) -> Result<Vec<SdpRecord>> {
     {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            debug!(
-                "sdptool is not installed; BlueZ SDP UUIDs are the only lookup source"
-            );
+            debug!("sdptool is not installed; BlueZ SDP UUIDs are the only lookup source");
             return Ok(Vec::new());
         }
         Err(error) => return Err(error).context("run sdptool browse"),
     };
 
     let records = parse_sdptool_browse(&String::from_utf8_lossy(&output.stdout));
-    info!("Found {} SDP records on {} with sdptool", records.len(), address);
+    info!(
+        "Found {} SDP records on {} with sdptool",
+        records.len(),
+        address
+    );
     Ok(records)
 }
 

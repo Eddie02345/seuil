@@ -7,6 +7,7 @@
 //! enrollment that yields the account key used by the BLE/LAN handshake.
 
 pub mod ble_keys;
+mod browser;
 mod credentials;
 pub mod crypto;
 pub mod handshake;
@@ -14,6 +15,7 @@ pub mod handshake;
 pub use credentials::{Credentials, data_path as credentials_path};
 
 use std::collections::BTreeMap;
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -53,10 +55,7 @@ const MACHINE_ID_PATH: &str = "/etc/machine-id";
 /// process-random value collides when the same Samsung account enrolls two
 /// Linux PCs, so the id comes from `/etc/machine-id` plus the hostname. Both
 /// parts are hashed so the raw machine id is never sent to Samsung.
-pub(crate) fn machine_device_id_from(
-    machine_id: Option<&str>,
-    hostname: Option<&str>,
-) -> String {
+pub(crate) fn machine_device_id_from(machine_id: Option<&str>, hostname: Option<&str>) -> String {
     let machine_id = machine_id.map(str::trim).filter(|value| !value.is_empty());
     let hostname = hostname.map(str::trim).filter(|value| !value.is_empty());
     if machine_id.is_none() && hostname.is_none() {
@@ -394,17 +393,52 @@ impl SamsungOAuth {
         Ok(url.into())
     }
 
+    /// Opens the sign-in page in the default browser and waits for the
+    /// `ms-app://` navigation through BiDi, or for a pasted callback.
     pub async fn interactive_login(&self, sign_in_uri: &str) -> Result<AuthCallback> {
         eprintln!("Samsung sign-in URL (open manually if no browser appears):\n{sign_in_uri}");
         let redirect = Url::parse(&self.redirect_uri).map_err(|e| {
             AuthError::Protocol(format!("invalid Samsung redirect URI setting: {e}"))
         })?;
-        let raw = if is_loopback(&redirect) {
-            self.await_loopback(redirect, sign_in_uri).await?
-        } else {
-            self.await_pasted_callback(sign_in_uri).await?
-        };
-        self.parse_callback(&raw)
+        if is_loopback(&redirect) {
+            let raw = self.await_loopback(redirect, sign_in_uri).await?;
+            return self.parse_manual_callback(&raw);
+        }
+
+        let mut capture = Box::pin(browser::capture_bidi_callback(sign_in_uri));
+        let mut stdin = tokio::task::spawn_blocking(read_stdin_line);
+        // A closed stdin (no terminal) must not abort the browser wait.
+        let mut stdin_open = true;
+        loop {
+            tokio::select! {
+                result = &mut capture => match result {
+                    Ok(callback) => return self.parse_manual_callback(&callback),
+                    Err(error) => {
+                        warn!(%error, "Browser capture is unavailable; waiting for a pasted callback");
+                        if !stdin_open {
+                            return Err(error);
+                        }
+                        eprintln!(
+                            "Browser capture did not start ({error}).\n\
+                             Open the URL above, then paste the ms-app:// callback URL or the \
+                             authorization code and press Enter."
+                        );
+                        open_manual(sign_in_uri);
+                        let raw = await_pasted_line(&mut stdin).await?;
+                        return self.parse_manual_callback(&raw);
+                    }
+                },
+                result = &mut stdin, if stdin_open => {
+                    match result.map_err(|error| {
+                        AuthError::Protocol(format!("could not read callback URL: {error}"))
+                    })? {
+                        Ok(Some(raw)) => return self.parse_manual_callback(&raw),
+                        Ok(None) => stdin_open = false,
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
     }
 
     pub async fn authenticate(&mut self, callback: &AuthCallback) -> Result<()> {
@@ -781,17 +815,27 @@ impl SamsungOAuth {
         Ok(callback.into())
     }
 
-    async fn await_pasted_callback(&self, sign_in_uri: &str) -> Result<String> {
-        eprintln!(
-            "After signing in, the browser may fail to open the ms-app:// callback.\n\
-             Copy the complete URL from the address bar, paste it here, and press Enter."
-        );
-        open_browser(sign_in_uri).await;
-        let read = tokio::task::spawn_blocking(read_stdin_line);
-        tokio::time::timeout(CALLBACK_TIMEOUT, read)
-            .await
-            .map_err(|_| AuthError::Protocol("Samsung sign-in callback timed out".into()))?
-            .map_err(|e| AuthError::Protocol(format!("could not read callback URL: {e}")))?
+    /// Parses an automated callback, or treats a bare authorization code as an
+    /// already-decrypted code for the current auth server.
+    fn parse_manual_callback(&self, raw: &str) -> Result<AuthCallback> {
+        let trimmed = raw.trim();
+        if trimmed.contains("/ANDROIDSDK/signInComplete") && !trimmed.contains("code=") {
+            return Err(AuthError::Protocol(
+                "that is the Samsung page address, not the callback: the browser cancelled the \
+                 ms-app:// redirect. Allow the “ms-app” link when the browser asks, or paste the \
+                 authorization code instead"
+                    .into(),
+            ));
+        }
+        if looks_like_raw_code(trimmed) {
+            return Ok(AuthCallback {
+                code: trimmed.to_string(),
+                auth_server_url: format!("https://{}", self.auth_server),
+                login_id: self.login_id.clone().unwrap_or_default(),
+                state: self.state.clone(),
+            });
+        }
+        self.parse_callback(trimmed)
     }
 
     fn parse_callback(&self, raw: &str) -> Result<AuthCallback> {
@@ -1168,16 +1212,63 @@ async fn open_browser(url: &str) {
     }
 }
 
-fn read_stdin_line() -> Result<String> {
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        return Err(AuthError::Protocol(
-            "no Samsung callback URL was provided".into(),
-        ));
+/// Opens the sign-in page through the desktop's `xdg-open` handler for the
+/// manual fallback flow.
+fn open_manual(url: &str) {
+    let target = url.to_string();
+    let printed = target.clone();
+    let result = Command::new("xdg-open")
+        .arg(&target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match result {
+        Ok(_) => {}
+        Err(error) => {
+            warn!(%error, "Could not run xdg-open");
+            eprintln!("Open this URL manually:\n{printed}");
+        }
     }
-    Ok(line)
+}
+
+/// A bare authorization code has no scheme, query separator, or whitespace.
+fn looks_like_raw_code(value: &str) -> bool {
+    let unpadded = value.trim_end_matches('=');
+    (8..=4096).contains(&value.len())
+        && !unpadded.is_empty()
+        && unpadded.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '~')
+        })
+}
+
+/// Reads the next non-empty pasted callback line, or `None` at end of input.
+fn read_stdin_line() -> Result<Option<String>> {
+    loop {
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let line = line.trim().to_string();
+        if !line.is_empty() {
+            return Ok(Some(line));
+        }
+    }
+}
+
+/// Waits for a pasted line. Input that already ended never completes, so the
+/// caller keeps its other source alive until it finishes.
+async fn await_pasted_line(
+    stdin: &mut tokio::task::JoinHandle<Result<Option<String>>>,
+) -> Result<String> {
+    match stdin
+        .await
+        .map_err(|error| AuthError::Protocol(format!("could not read callback URL: {error}")))?
+        .map_err(|error| AuthError::Protocol(format!("could not read callback URL: {error}")))?
+    {
+        Some(line) => Ok(line),
+        None => std::future::pending::<Result<String>>().await,
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1244,7 +1335,11 @@ mod tests {
     fn machine_device_id_falls_back_to_the_hostname() {
         let from_host = machine_device_id_from(None, Some("steamdeck"));
         assert_eq!(from_host.len(), 32);
-        assert!(from_host.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(
+            from_host
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Interactive first-time setup.
 //!
-//! `seuil setup [--reauth]` enrolls the Samsung account when needed, lists the
-//! BlueZ paired devices for the user to pick from, writes the config, and
-//! installs and starts the systemd user unit.
+//! `seuil setup [--reauth]` enrolls the Samsung account when
+//! needed, lists the BlueZ paired devices for the user to pick from, writes the
+//! config, and installs and starts the systemd user unit.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use clap::Parser;
 use tracing::info;
 
 use crate::auth::{self, Credentials};
-use crate::{config, Cli};
+use crate::{Cli, config};
 
 /// Systemd unit name, also the service name.
 const SERVICE: &str = "seuil.service";
@@ -105,8 +105,7 @@ pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
     let buds = devices[buds_index].address.clone();
 
     let dir = config::config_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let config_path = dir.join("config.toml");
     let text = format!(
         "# Seuil configuration\ndevice_id = \"{device_id}\"\nphone_mac = \"{phone}\"\nbuds_mac = \"{buds}\"\n# adapter = \"{}\"\n# discover = true\n",
@@ -328,7 +327,8 @@ fn ensure_user_path() -> Result<()> {
 /// True when no line already exports `~/.local/bin` on PATH.
 fn path_entry_missing(bashrc: &str) -> bool {
     !bashrc.lines().any(|line| {
-        line.contains("PATH") && (line.contains("$HOME/.local/bin") || line.contains("${HOME}/.local/bin"))
+        line.contains("PATH")
+            && (line.contains("$HOME/.local/bin") || line.contains("${HOME}/.local/bin"))
     })
 }
 
@@ -341,8 +341,7 @@ fn install_desktop_shortcut() -> Result<()> {
     }
 
     let desktop = home.join("Desktop");
-    std::fs::create_dir_all(&desktop)
-        .with_context(|| format!("create {}", desktop.display()))?;
+    std::fs::create_dir_all(&desktop).with_context(|| format!("create {}", desktop.display()))?;
     let path = desktop.join("Seuil Setup.desktop");
     std::fs::write(&path, desktop_entry_text(&bin))
         .with_context(|| format!("write {}", path.display()))?;

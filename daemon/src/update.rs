@@ -34,10 +34,9 @@ struct Asset {
 
 /// Downloads and installs the latest release over the running binary.
 pub async fn run(force: bool) -> Result<()> {
-    let current = fs::canonicalize(
-        std::env::current_exe().context("locate the running seuil binary")?,
-    )
-    .context("resolve the running seuil binary")?;
+    let current =
+        fs::canonicalize(std::env::current_exe().context("locate the running seuil binary")?)
+            .context("resolve the running seuil binary")?;
     if is_system_managed(&current) {
         bail!(
             "{} is managed by the system package manager; update it with pacman or apt",
@@ -72,9 +71,8 @@ pub async fn run(force: bool) -> Result<()> {
         return Ok(());
     }
 
-    let asset = select_asset(&release.assets).with_context(|| {
-        format!("release v{latest} has no {ASSET_SUFFIX} asset")
-    })?;
+    let asset = select_asset(&release.assets)
+        .with_context(|| format!("release v{latest} has no {ASSET_SUFFIX} asset"))?;
     println!("Downloading {}", asset.name);
     let response = client
         .get(&asset.browser_download_url)
@@ -158,7 +156,9 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<()> {
 
 /// Picks the generic Linux x86_64 tarball from a release.
 fn select_asset(assets: &[Asset]) -> Option<&Asset> {
-    assets.iter().find(|asset| asset.name.ends_with(ASSET_SUFFIX))
+    assets
+        .iter()
+        .find(|asset| asset.name.ends_with(ASSET_SUFFIX))
 }
 
 /// True for binaries installed under a root-owned system prefix.
@@ -298,8 +298,6 @@ mod tests {
     fn refuses_system_managed_locations() {
         assert!(is_system_managed(Path::new("/usr/bin/seuil")));
         assert!(is_system_managed(Path::new("/usr/local/bin/seuil")));
-        assert!(!is_system_managed(Path::new(
-            "/home/deck/.local/bin/seuil"
-        )));
+        assert!(!is_system_managed(Path::new("/home/deck/.local/bin/seuil")));
     }
 }

@@ -15,7 +15,7 @@
 //! reason 1 means media playback, 2 means a phone call.
 //! Response body: `[result:1][adv id:2][address:6]`.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bluer::l2cap::Stream;
 use prost::Message;
 use std::time::Duration;
@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::protocol::command::{
-    decrypt, encode_varint, encrypt, parse_frame, read_frame, McfCommand, McfPacket,
+    McfCommand, McfPacket, decrypt, encode_varint, encrypt, parse_frame, read_frame,
 };
 
 /// Handler id for the phone's Auto Switch behavior.
@@ -101,10 +101,7 @@ pub fn advertisement_id(address: [u8; 6]) -> u16 {
 
 /// Parses a Bluetooth address string into six bytes in string order.
 pub fn parse_address(address: &str) -> Result<[u8; 6]> {
-    let digits: String = address
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
+    let digits: String = address.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     if digits.len() != 12 {
         return Err(anyhow!("invalid Bluetooth address {address:?}"));
     }

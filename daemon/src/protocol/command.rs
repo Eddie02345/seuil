@@ -6,8 +6,8 @@
 //! ECDH session key, with a random 16-byte IV prepended.
 
 use aes::Aes256;
-use anyhow::{anyhow, Result};
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use anyhow::{Result, anyhow};
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use prost::Message;
 use rand::RngCore;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -110,7 +110,9 @@ pub fn parse_frame(frame: &[u8]) -> Result<McfPacket> {
     let (len, header_len) = decode_varint(frame)?;
     let len = usize::try_from(len).map_err(|_| anyhow!("frame length does not fit in memory"))?;
     if len > MAX_FRAME_LEN {
-        return Err(anyhow!("frame length {len} exceeds the {MAX_FRAME_LEN}-byte limit"));
+        return Err(anyhow!(
+            "frame length {len} exceeds the {MAX_FRAME_LEN}-byte limit"
+        ));
     }
     let payload = frame
         .get(header_len..header_len + len)
@@ -147,9 +149,12 @@ where
         }
     }
 
-    let len = usize::try_from(length).map_err(|_| anyhow!("frame length does not fit in memory"))?;
+    let len =
+        usize::try_from(length).map_err(|_| anyhow!("frame length does not fit in memory"))?;
     if len > MAX_FRAME_LEN {
-        return Err(anyhow!("frame length {len} exceeds the {MAX_FRAME_LEN}-byte limit"));
+        return Err(anyhow!(
+            "frame length {len} exceeds the {MAX_FRAME_LEN}-byte limit"
+        ));
     }
 
     let mut payload = vec![0u8; len];

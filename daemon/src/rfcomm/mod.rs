@@ -73,7 +73,6 @@ pub async fn send_autoswitch_command(
     socket: &mut (impl tokio::io::AsyncWriteExt + Unpin),
     command: &AutoSwitchCommand,
 ) -> Result<()> {
-
     // Serialize the command envelope: app id, sequence, type, flags.
     let mut frame = vec![
         command.app_id,

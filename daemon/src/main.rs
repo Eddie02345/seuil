@@ -125,16 +125,17 @@ async fn main() -> Result<()> {
         cli.buds = file_config.buds_mac.unwrap_or_default();
     }
     if cli.adapter == "hci0"
-        && let Some(adapter) = file_config.adapter.clone() {
-            cli.adapter = adapter;
-        }
+        && let Some(adapter) = file_config.adapter.clone()
+    {
+        cli.adapter = adapter;
+    }
     let discover_buds = file_config.discover;
 
     // Initialize logging. `RUST_LOG` wins when set; otherwise `--debug`
     // selects debug and the default is info.
     let default_filter = if cli.debug { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     if cli.auth_login || cli.auth_refresh {
@@ -237,7 +238,10 @@ async fn main() -> Result<()> {
     let buds_address = match ble::coc_session::parse_address(&cli.buds) {
         Ok(address) => Some(address),
         Err(e) => {
-            warn!("Buds address {:?} is invalid; Auto Switch requests disabled: {e}", cli.buds);
+            warn!(
+                "Buds address {:?} is invalid; Auto Switch requests disabled: {e}",
+                cli.buds
+            );
             None
         }
     };
@@ -262,8 +266,15 @@ async fn main() -> Result<()> {
                 warn!(%buds_string, "Could not parse the Buds address for ownership tracking");
                 return;
             };
-            watch_buds_ownership(watcher_adapter, buds_device, adv_id, advertise_tx, playback, state)
-                .await;
+            watch_buds_ownership(
+                watcher_adapter,
+                buds_device,
+                adv_id,
+                advertise_tx,
+                playback,
+                state,
+            )
+            .await;
         });
     }
     let mut l2cap_attempts: HashMap<String, Instant> = HashMap::new();
@@ -533,15 +544,17 @@ async fn read_adapter_address(adapter: &str) -> Option<String> {
     if let Ok(output) = std::process::Command::new("hciconfig")
         .arg(adapter)
         .output()
-        && output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("BD Address")
-                    && let Some(addr) = line.split_whitespace().nth(2) {
-                        return Some(addr.to_string());
-                    }
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains("BD Address")
+                && let Some(addr) = line.split_whitespace().nth(2)
+            {
+                return Some(addr.to_string());
             }
         }
+    }
 
     tracing::debug!(adapter, "Could not read adapter address");
     None
@@ -682,8 +695,7 @@ struct SwitchState {
 impl SwitchState {
     /// True when the phone call session currently owns the Buds.
     fn call_active(&self, now: Instant) -> bool {
-        self.call_active_until
-            .is_some_and(|until| now < until)
+        self.call_active_until.is_some_and(|until| now < until)
     }
 
     /// True when a local playback start may ask for the Buds.
@@ -826,9 +838,10 @@ async fn handle_incoming_command(
                 address,
             };
             if let Some(sender) = channels.lock().await.get(peer)
-                && sender.send(response).await.is_err() {
-                    warn!("Command channel closed while acknowledging the handoff");
-                }
+                && sender.send(response).await.is_err()
+            {
+                warn!("Command channel closed while acknowledging the handoff");
+            }
         }
         ble::coc_session::IncomingCommand::BudsSwitchResponse {
             result,
@@ -989,10 +1002,11 @@ async fn maybe_connect_coc(
         // media event is edge-based, so without this the first handoff after a
         // daemon start would be skipped.
         if let Some(buds_address) = buds_address
-            && local_playback.load(std::sync::atomic::Ordering::Relaxed) {
-                let state = switch_state.lock().await;
-                request_buds_switch(&adapter, buds_address, &channels, &state).await;
-            }
+            && local_playback.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let state = switch_state.lock().await;
+            request_buds_switch(&adapter, buds_address, &channels, &state).await;
+        }
     });
 }
 
@@ -1046,8 +1060,9 @@ async fn watch_buds_ownership(
             }
         };
         while let Some(event) = events.next().await {
-            if let bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(connected)) =
-                event
+            if let bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(
+                connected,
+            )) = event
             {
                 if last == Some(connected) {
                     continue;
@@ -1145,13 +1160,8 @@ mod tests {
 
     #[test]
     fn bt_address_is_accepted_after_setup_subcommand() {
-        let cli = Cli::try_parse_from([
-            "seuil",
-            "setup",
-            "--bt-address",
-            "AA:BB:CC:DD:EE:FF",
-        ])
-        .expect("global --bt-address should parse after a subcommand");
+        let cli = Cli::try_parse_from(["seuil", "setup", "--bt-address", "AA:BB:CC:DD:EE:FF"])
+            .expect("global --bt-address should parse after a subcommand");
         assert_eq!(cli.bt_address.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
     }
 
@@ -1164,10 +1174,7 @@ mod tests {
     fn attempt_within_retry_interval_is_rejected() {
         let now = Instant::now();
         assert!(!attempt_allowed(Some(now), now));
-        assert!(!attempt_allowed(
-            Some(now - COC_RETRY_INTERVAL / 2),
-            now
-        ));
+        assert!(!attempt_allowed(Some(now - COC_RETRY_INTERVAL / 2), now));
     }
 
     #[test]

@@ -30,9 +30,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
 use super::{AuthError, Result};
-use crate::protocol::command::{
-    encode_varint, parse_frame, read_frame, McfPacket, MAX_VARINT_LEN,
-};
+use crate::protocol::command::{MAX_VARINT_LEN, McfPacket, encode_varint, parse_frame, read_frame};
 
 /// Envelope handler id used by the handshake delegate.
 const HANDLER_ID_HANDSHAKE: u64 = 0;
@@ -171,9 +169,10 @@ impl AuthHandshake {
             ));
         }
 
-        let peer_public_key = PublicKey::from_public_key_der(body.nonce.as_slice()).map_err(|e| {
-            AuthError::Protocol(format!("phone handshake key is not a P-256 SPKI: {e}"))
-        })?;
+        let peer_public_key =
+            PublicKey::from_public_key_der(body.nonce.as_slice()).map_err(|e| {
+                AuthError::Protocol(format!("phone handshake key is not a P-256 SPKI: {e}"))
+            })?;
 
         let shared = diffie_hellman(
             self.private_key.to_nonzero_scalar(),
@@ -215,7 +214,7 @@ impl AuthHandshake {
             })?
     }
 
-async fn exchange<S>(&self, stream: &mut S) -> Result<[u8; 32]>
+    async fn exchange<S>(&self, stream: &mut S) -> Result<[u8; 32]>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -264,9 +263,9 @@ async fn exchange<S>(&self, stream: &mut S) -> Result<[u8; 32]>
 
         let mut frame = Vec::with_capacity(packet.encoded_len() + MAX_VARINT_LEN);
         encode_varint(packet.encoded_len() as u64, &mut frame);
-        packet
-            .encode(&mut frame)
-            .map_err(|e| AuthError::Protocol(format!("could not encode the handshake packet: {e}")))?;
+        packet.encode(&mut frame).map_err(|e| {
+            AuthError::Protocol(format!("could not encode the handshake packet: {e}"))
+        })?;
         Ok(frame)
     }
 
@@ -304,4 +303,3 @@ fn proof(public_key_der: &[u8]) -> [u8; PROOF_LEN] {
     truncated.copy_from_slice(&digest[..PROOF_LEN]);
     truncated
 }
-
