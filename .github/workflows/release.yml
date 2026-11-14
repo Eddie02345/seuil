@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  BINARY: seuil
+
+jobs:
+  tarball:
+    name: Generic x86_64 tarball
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked --manifest-path daemon/Cargo.toml
+      - name: Pack
+        run: |
+          mkdir -p dist
+          tar -C daemon/target/release -czf \
+            "dist/${BINARY}-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" "${BINARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  arch:
+    name: Arch package
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed rust cargo git sudo pacman-contrib curl
+          source packaging/aur/PKGBUILD
+          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"
+      - name: Create builder user
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+      - name: Sync the tagged version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sed -i "s/^pkgver=.*/pkgver=${version}/" packaging/aur/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/aur/PKGBUILD
+          mkdir -p /tmp/build
+          cp -a . /tmp/build
+          chown -R builder:builder /tmp/build
+      - name: Update checksums and build the package
+        run: |
+          runuser -u builder -- bash -lc \
+            'cd /tmp/build/packaging/aur && updpkgsums && makepkg --noconfirm'
+      - name: Collect package
+        run: |
+          mkdir -p dist
+          cp /tmp/build/packaging/aur/${BINARY}-[0-9]*-x86_64.pkg.tar.zst dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: [tarball, arch]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List assets
+        run: ls -l dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.pkg.tar.zst

@@ -58,15 +58,40 @@ The wire format, message ids, and field layouts are documented in
 Seuil also needs the `bluer` crate's BlueZ backend, which is built from source
 by Cargo.
 
-## Install
+## Installation
+
+### Arch Linux
+
+The package is published with each GitHub release as a prebuilt
+`.pkg.tar.zst`, so no AUR account is needed.
+
+#### Prebuilt package
 
 ```sh
-./install.sh
+sudo pacman -U https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-1.0.0-1-x86_64.pkg.tar.zst
+seuil setup
 ```
 
-The script checks the runtime tools, builds the release binary, installs it to
-`~/.local/bin/seuil`, and starts the interactive wizard. You need a Samsung
-account and both devices paired in `bluetoothctl` first.
+You can also download `seuil-<version>-1-x86_64.pkg.tar.zst` from the
+[releases page](https://github.com/Eddie02345/seuil/releases) and install it
+with `sudo pacman -U <file>`.
+
+#### Build from source
+
+```sh
+sudo pacman -S --needed base-devel pkg-config dbus bluez bluez-utils \
+    pipewire pipewire-pulse libpulse playerctl rust
+git clone https://github.com/Eddie02345/seuil.git
+cd seuil/packaging/aur
+makepkg -si
+seuil setup
+```
+
+AUR publishing (`paru -S seuil`, `yay -S seuil`) is queued until new AUR
+account registration reopens. The package recipe in `packaging/aur` is already
+ready and builds the same binary the release asset contains.
+
+### First-run setup
 
 The wizard (`seuil setup`, `seuil setup --reauth`):
 
@@ -77,6 +102,9 @@ The wizard (`seuil setup`, `seuil setup --reauth`):
 3. writes `~/.config/seuil/config.toml`, installs
    `~/.config/systemd/user/seuil.service`, reloads systemd, and enables and
    starts the service.
+
+Both devices must be paired in `bluetoothctl` first, and you need a Samsung
+account.
 
 ## Usage
 
