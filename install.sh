@@ -109,19 +109,13 @@ else
 fi
 
 missing=()
-optional=()
 check() {
     command -v "$1" >/dev/null 2>&1 || missing+=("$1")
-}
-check_optional() {
-    command -v "$1" >/dev/null 2>&1 || optional+=("$1")
 }
 
 echo "Checking build and runtime requirements"
 check bluetoothctl
 check systemctl
-check_optional pw-dump
-check_optional playerctl
 if [[ "${INSTALL_METHOD}" == "source" ]]; then
     check cargo
     check pkg-config
@@ -133,10 +127,6 @@ else
     check tar
 fi
 
-if [[ ${#optional[@]} -ne 0 ]]; then
-    echo "Optional tools not found: ${optional[*]}; MPRIS pause/status may be limited"
-fi
-
 if [[ ${#missing[@]} -ne 0 ]]; then
     echo
     echo "Missing requirements: ${missing[*]:-}"
@@ -146,15 +136,15 @@ Install the runtime packages with:
 
   Arch:
     sudo pacman -S --needed bluez bluez-utils dbus pipewire pipewire-pulse \
-        libpulse playerctl curl
+        libpulse curl
 
   Debian / Ubuntu:
     sudo apt update && sudo apt install -y bluez pipewire pipewire-bin \
-        pipewire-pulse playerctl curl
+        pipewire-pulse curl
 
   Fedora:
     sudo dnf install -y bluez pipewire pipewire-utils pipewire-pulseaudio \
-        playerctl curl
+        curl
 
 For a source build also install:
 

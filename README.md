@@ -69,10 +69,10 @@ The wire format, message ids, and field layouts are documented in
 
 | Distribution | Runtime packages | Build packages |
 |---|---|---|
-| SteamOS / Steam Deck | Preinstalled BlueZ and PipeWire; `playerctl` for MPRIS | Rust, `pkg-config`, and D-Bus headers only for source builds |
-| Arch | `bluez bluez-utils dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
-| Debian / Ubuntu | `bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3` | `build-essential pkg-config libdbus-1-dev libssl-dev` |
-| Fedora | `bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
+| SteamOS / Steam Deck | Preinstalled BlueZ, PipeWire, and libpulse; no extra runtime packages | Rust, `pkg-config`, and D-Bus headers only for source builds |
+| Arch | `bluez bluez-utils dbus pipewire pipewire-pulse libpulse` | `base-devel rust` |
+| Debian / Ubuntu | `bluez pipewire pipewire-bin pipewire-pulse libdbus-1-3` | `build-essential pkg-config libdbus-1-dev libssl-dev` |
+| Fedora | `bluez pipewire pipewire-utils pipewire-pulseaudio dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
 
 Runtime packages are enough for the prebuilt binaries. Source builds also need
 the build packages; the per-distribution commands below include both. On
@@ -158,7 +158,7 @@ with `sudo pacman -U <file>`.
 
 ```sh
 sudo pacman -S --needed base-devel pkg-config dbus bluez bluez-utils \
-    pipewire pipewire-pulse libpulse playerctl rust
+    pipewire pipewire-pulse libpulse rust
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil/packaging/aur
 makepkg -si
@@ -176,7 +176,7 @@ Run these commands on recent Debian or Ubuntu (22.04+).
 #### Prebuilt binary (no Rust toolchain)
 
 ```sh
-sudo apt update && sudo apt install -y bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3
+sudo apt update && sudo apt install -y bluez pipewire pipewire-bin pipewire-pulse libdbus-1-3
 mkdir -p ~/.local/bin
 curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
@@ -190,7 +190,7 @@ Substitute the latest tag from the
 #### Build from source via `./install.sh`
 
 ```sh
-sudo apt update && sudo apt install -y build-essential pkg-config libdbus-1-dev libssl-dev bluez pipewire pipewire-bin pipewire-pulse playerctl curl
+sudo apt update && sudo apt install -y build-essential pkg-config libdbus-1-dev libssl-dev bluez pipewire pipewire-bin pipewire-pulse curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil
@@ -205,7 +205,7 @@ Installing Rust with `rustup` is recommended on Debian/Ubuntu: the distro
 #### Prebuilt binary (no Rust toolchain)
 
 ```sh
-sudo dnf install -y bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
+sudo dnf install -y bluez pipewire pipewire-utils pipewire-pulseaudio dbus-libs
 mkdir -p ~/.local/bin
 curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
@@ -215,7 +215,7 @@ tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 #### Build from source via `./install.sh`
 
 ```sh
-sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez pipewire pipewire-utils pipewire-pulseaudio playerctl
+sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez pipewire pipewire-utils pipewire-pulseaudio
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil
 ./install.sh --from-source
@@ -279,7 +279,7 @@ AES-256-GCM encrypted with a local key.
 | `Ctx={lost}` in phone logs | The advertisement type-1/type-3 records are malformed or the phone has not scanned yet; confirm the daemon advertised a 26-byte payload |
 | `os error 107` / `104` on the CoC | The phone closed the app-side socket; check the phone's `mcfds` logcat, then the keepalive and reconnect ticks in the daemon log |
 | Buds never move | BlueZ must see the Buds as paired; the phone must be unlocked once after boot for Auto Switch |
-| No playback trigger | `playerctl -a status` should show `Playing`; browsers keep idle PipeWire nodes, so MPRIS is the reliable signal |
+| No playback trigger | An MPRIS player must report `Playing`; browsers keep idle PipeWire nodes, so MPRIS is the reliable signal |
 
 Logs: `journalctl --user -u seuil.service -f`.
 

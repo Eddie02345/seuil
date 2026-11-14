@@ -36,11 +36,7 @@ pub async fn monitor_pipewire(tx: mpsc::Sender<MediaEvent>) -> Result<()> {
 
             if playing != last_playing {
                 last_playing = playing;
-                let source = if mpris_playing {
-                    "mpris"
-                } else {
-                    "pipewire"
-                };
+                let source = if mpris_playing { "mpris" } else { "pipewire" };
                 let event = if playing {
                     MediaEvent::AudioStarted {
                         stream_name: source.to_string(),
@@ -79,19 +75,24 @@ async fn check_audio_playing() -> bool {
     }
 }
 
-/// True when any MPRIS player reports `Playing` (`playerctl -a status`).
+/// True when any MPRIS player reports `Playing` over the session D-Bus.
 async fn check_mpris_playing() -> bool {
-    let output = tokio::process::Command::new("playerctl")
-        .args(["-a", "status"])
-        .output()
-        .await;
-
-    match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|line| line.trim() == "Playing"),
-        Err(_) => false,
-    }
+    tokio::task::spawn_blocking(|| {
+        let Ok(finder) = mpris::PlayerFinder::new() else {
+            return false;
+        };
+        let Ok(players) = finder.find_all() else {
+            return false;
+        };
+        players.iter().any(|player| {
+            matches!(
+                player.get_playback_status(),
+                Ok(mpris::PlaybackStatus::Playing)
+            )
+        })
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Control MPRIS media players
