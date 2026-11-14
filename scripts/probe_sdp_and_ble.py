@@ -657,7 +657,7 @@ def parse_sdptool_output(text: str) -> list[SdpRecord]:
 def run_sdptool(mac: str, timeout: float) -> tuple[int, str, str, str]:
     executable = shutil.which("sdptool")
     if not executable:
-        raise ProbeError("sdptool not found in PATH (install bluez-utils)")
+        raise ProbeError("sdptool not found in PATH (install bluez-deprecated-tools on Arch/CachyOS, bluez on Debian/Ubuntu, or bluez-deprecated on Fedora)")
     try:
         completed = subprocess.run(
             [executable, "browse", mac],

@@ -15,6 +15,7 @@ check() {
 echo "Checking build and runtime requirements"
 check cargo
 check bluetoothctl
+check sdptool
 check pw-dump
 check playerctl
 check systemctl
@@ -32,7 +33,7 @@ Install them with:
 
   Arch:
     sudo pacman -S --needed base-devel pkg-config dbus bluez bluez-utils \
-        pipewire pipewire-pulse libpulse playerctl rust
+        bluez-deprecated-tools pipewire pipewire-pulse libpulse playerctl rust
 
   Debian / Ubuntu:
     sudo apt update && sudo apt install -y build-essential pkg-config \
@@ -41,7 +42,10 @@ Install them with:
 
   Fedora:
     sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo \
-        bluez pipewire pipewire-utils pipewire-pulseaudio playerctl
+        bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl
+
+sdptool: Arch/CachyOS -> bluez-deprecated-tools, Debian/Ubuntu -> bluez,
+Fedora -> bluez-deprecated.
 
 Then re-run ./install.sh.
 HINTS

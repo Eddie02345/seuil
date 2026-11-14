@@ -1,12 +1,12 @@
 # Maintainer: Eddie02345 <Eddie02345@users.noreply.github.com>
 pkgname=seuil
-pkgver=0.1.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Pass Galaxy Buds audio between a Samsung phone and Linux over Samsung Continuity"
 arch=('x86_64')
 url="https://github.com/Eddie02345/seuil"
 license=('GPL-3.0-or-later')
-depends=('bluez' 'bluez-utils' 'dbus' 'pipewire' 'pipewire-pulse' 'libpulse' 'playerctl')
+depends=('bluez' 'bluez-utils' 'bluez-deprecated-tools' 'dbus' 'pipewire' 'pipewire-pulse' 'libpulse' 'playerctl')
 makedepends=('cargo' 'git' 'rust')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Eddie02345/seuil/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')

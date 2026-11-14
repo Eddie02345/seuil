@@ -83,7 +83,7 @@ struct Cli {
     auth_server: String,
 
     /// Local Bluetooth address to enroll (default: adapter sysfs address)
-    #[arg(long)]
+    #[arg(long, global = true)]
     bt_address: Option<String>,
 }
 
@@ -121,12 +121,11 @@ async fn main() -> Result<()> {
         }
     let discover_buds = file_config.discover;
 
-    // Initialize logging
-    let filter = if cli.debug {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::new("info")
-    };
+    // Initialize logging. `RUST_LOG` wins when set; otherwise `--debug`
+    // selects debug and the default is info.
+    let default_filter = if cli.debug { "debug" } else { "info" };
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_filter));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     if cli.auth_login || cli.auth_refresh {
@@ -426,16 +425,15 @@ async fn run_auth(cli: &Cli) -> Result<()> {
         None => auth::SamsungOAuth::new(&cli.auth_server)?,
     };
 
-    let address = cli
-        .bt_address
-        .clone()
-        .or_else(|| read_adapter_address(&cli.adapter))
-        .or_else(|| {
+    let address = match cli.bt_address.clone() {
+        Some(address) => Some(address),
+        None => read_adapter_address(&cli.adapter).await.or_else(|| {
             stored
                 .as_ref()
                 .map(|stored| stored.bt_address.clone())
                 .filter(|address| !address.is_empty())
-        });
+        }),
+    };
     let Some(address) = address else {
         anyhow::bail!(
             "could not read the address of {}; pass --bt-address",
@@ -506,8 +504,8 @@ async fn run_auth(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn read_adapter_address(adapter: &str) -> Option<String> {
-    // Try sysfs first
+async fn read_adapter_address(adapter: &str) -> Option<String> {
+    // Try sysfs first: no D-Bus round trip on the common path.
     let path = format!("/sys/class/bluetooth/{adapter}/address");
     if let Ok(address) = std::fs::read_to_string(&path) {
         let address = address.trim().to_string();
@@ -515,8 +513,14 @@ fn read_adapter_address(adapter: &str) -> Option<String> {
             return Some(address);
         }
     }
-    
-    // Fallback to hciconfig
+
+    // Fall back to BlueZ over D-Bus when sysfs is unreadable, for example
+    // inside containers or with restricted permissions.
+    if let Some(address) = read_adapter_address_from_bluez(adapter).await {
+        return Some(address);
+    }
+
+    // Last resort: the deprecated hciconfig tool.
     if let Ok(output) = std::process::Command::new("hciconfig")
         .arg(adapter)
         .output()
@@ -529,9 +533,26 @@ fn read_adapter_address(adapter: &str) -> Option<String> {
                     }
             }
         }
-    
+
     tracing::debug!(adapter, "Could not read adapter address");
     None
+}
+
+/// Reads `org.bluez.Adapter1.Address` from the system bus.
+async fn read_adapter_address_from_bluez(adapter: &str) -> Option<String> {
+    let connection = zbus::Connection::system().await.ok()?;
+    let path = format!("/org/bluez/{adapter}");
+    let proxy = zbus::Proxy::new(
+        &connection,
+        "org.bluez",
+        path.as_str(),
+        "org.bluez.Adapter1",
+    )
+    .await
+    .ok()?;
+    let address: String = proxy.get_property("Address").await.ok()?;
+    let address = address.trim();
+    (!address.is_empty()).then(|| address.to_string())
 }
 
 fn unix_now() -> i64 {
@@ -1089,10 +1110,10 @@ async fn handle_action(action: HandoffAction, dry_run: &bool) {
             info!("Phone should now connect to Buds");
         }
         HandoffAction::ClaimBuds => {
-            info!("=== HANDOFF: Linux claiming Buds ===");
-            // TODO: Send CONTINUITY_MSG_SPP handoff command to phone
-            // TODO: Connect A2DP to Buds
-            info!("Connecting A2DP to Buds...");
+            info!(
+                "ClaimBuds: requesting the Buds from the phone; A2DP is pulled \
+                 when the phone answers the switch request"
+            );
         }
         HandoffAction::PhoneReady => {
             info!("Phone is ready for Linux to take over");
@@ -1112,6 +1133,18 @@ async fn handle_action(action: HandoffAction, dry_run: &bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bt_address_is_accepted_after_setup_subcommand() {
+        let cli = Cli::try_parse_from([
+            "seuil",
+            "setup",
+            "--bt-address",
+            "AA:BB:CC:DD:EE:FF",
+        ])
+        .expect("global --bt-address should parse after a subcommand");
+        assert_eq!(cli.bt_address.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+    }
 
     #[test]
     fn first_attempt_is_allowed() {

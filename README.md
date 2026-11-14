@@ -43,7 +43,8 @@ The wire format, message ids, and field layouts are documented in
 - **Phone:** any Samsung device running One UI with the Continuity / Auto Switch
   service (`com.samsung.android.mcfds`), signed into a Samsung account.
 - **Buds:** any Auto-Switch-capable Galaxy Buds: Buds+, Buds Live, Buds Pro,
-  Buds2, Buds2 Pro, Buds FE, Buds Core (SM-R410), Buds3, Buds3 Pro.
+  Buds2, Buds2 Pro, Buds FE, Buds Core (SM-R410), Buds3, Buds3 Pro, Buds4,
+  Buds4 Pro.
 - **Desktop:** Linux with BlueZ, PipeWire/PulseAudio, and a Bluetooth adapter
   that supports LE and A2DP.
 
@@ -51,9 +52,9 @@ The wire format, message ids, and field layouts are documented in
 
 | Distribution | Runtime packages | Build packages |
 |---|---|---|
-| Arch | `bluez bluez-utils dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
+| Arch | `bluez bluez-utils bluez-deprecated-tools dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
 | Debian / Ubuntu | `bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3` | `build-essential pkg-config libdbus-1-dev libssl-dev` |
-| Fedora | `bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
+| Fedora | `bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
 
 Runtime packages are enough for the prebuilt binaries. Source builds also need
 the build packages; the per-distribution commands below include both.
@@ -71,7 +72,7 @@ The package is published with each GitHub release as a prebuilt
 #### Prebuilt package
 
 ```sh
-sudo pacman -U https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-1.0.0-1-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-1.0.1-1-x86_64.pkg.tar.zst
 seuil setup
 ```
 
@@ -83,7 +84,7 @@ with `sudo pacman -U <file>`.
 
 ```sh
 sudo pacman -S --needed base-devel pkg-config dbus bluez bluez-utils \
-    pipewire pipewire-pulse libpulse playerctl rust
+    bluez-deprecated-tools pipewire pipewire-pulse libpulse playerctl rust
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil/packaging/aur
 makepkg -si
@@ -103,14 +104,14 @@ Run these commands on recent Debian or Ubuntu (22.04+).
 ```sh
 sudo apt update && sudo apt install -y bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3
 mkdir -p ~/.local/bin
-curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 ~/.local/bin/seuil setup
 ```
 
 Substitute the latest tag from the
 [releases page](https://github.com/Eddie02345/seuil/releases) if it is not
-`v1.0.0`.
+`v1.0.1`.
 
 #### Build from source via `./install.sh`
 
@@ -130,9 +131,9 @@ Installing Rust with `rustup` is recommended on Debian/Ubuntu: the distro
 #### Prebuilt binary (no Rust toolchain)
 
 ```sh
-sudo dnf install -y bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
+sudo dnf install -y bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
 mkdir -p ~/.local/bin
-curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 ~/.local/bin/seuil setup
 ```
@@ -140,7 +141,7 @@ tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 #### Build from source via `./install.sh`
 
 ```sh
-sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez pipewire pipewire-utils pipewire-pulseaudio playerctl
+sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil
 ./install.sh
@@ -169,6 +170,7 @@ seuil setup           # interactive setup
 seuil --phone AA:BB:CC:DD:EE:FF --buds 11:22:33:44:55:66   # flags override config
 seuil --auth-login    # enroll or re-enroll the account
 seuil --debug         # verbose logs
+RUST_LOG=debug seuil  # choose a log filter with RUST_LOG
 ```
 
 Configuration lives in `~/.config/seuil/config.toml`:
@@ -188,6 +190,10 @@ AES-256-GCM encrypted with a local key.
 | Symptom | Check |
 |---|---|
 | Service exits immediately | `journalctl --user -u seuil.service -n 50`; missing phone/Buds MACs point at `config.toml` |
+| `could not read the address of hci0` | Start `bluetoothd`, or pass `--bt-address AA:BB:CC:DD:EE:FF`; the address is read from sysfs, then BlueZ over D-Bus, then `hciconfig` |
+| `sdptool: command not found` | Install `bluez-deprecated-tools` on Arch/CachyOS; `sdptool` ships in `bluez` on Debian/Ubuntu and in `bluez-deprecated` on Fedora |
+| Logs are too quiet | `RUST_LOG=debug` or `RUST_LOG=seuil=trace`; `--debug` sets the default filter to debug |
+| `CONTINUITY_MSG_SPP NOT found on phone`, or no answer after `ready` | Enable Auto Switch on the phone, link the phone and the Galaxy Buds to the same Samsung Account, and unlock the phone during initial setup |
 | `userKeyDecrypt fail` on the phone | Re-enroll: `seuil setup --reauth` (the account key no longer matches) |
 | `Ctx={lost}` in phone logs | The advertisement type-1/type-3 records are malformed or the phone has not scanned yet; confirm the daemon advertised a 26-byte payload |
 | `os error 107` / `104` on the CoC | The phone closed the app-side socket; check the phone's `mcfds` logcat, then the keepalive and reconnect ticks in the daemon log |
