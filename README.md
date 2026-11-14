@@ -51,12 +51,17 @@ The wire format, message ids, and field layouts are documented in
 
 | Distribution | Runtime packages | Build packages |
 |---|---|---|
-| Arch | `bluez bluez-utils dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
+| Arch | `bluez bluez-utils bluez-deprecated-tools dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
 | Debian / Ubuntu | `bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3` | `build-essential pkg-config libdbus-1-dev libssl-dev` |
-| Fedora | `bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
+| Fedora | `bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
 
 Runtime packages are enough for the prebuilt binaries. Source builds also need
 the build packages; the per-distribution commands below include both.
+
+`sdptool` is required to query the phone's SDP records. It ships in
+`bluez-deprecated-tools` on Arch, `bluez` on Debian/Ubuntu, and
+`bluez-deprecated` on Fedora. Without it the daemon exits with
+`Error: No such file or directory` during startup.
 
 Seuil also needs the `bluer` crate's BlueZ backend, which is built from source
 by Cargo.
@@ -71,7 +76,7 @@ The package is published with each GitHub release as a prebuilt
 #### Prebuilt package
 
 ```sh
-sudo pacman -U https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-1.0.0-1-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-1.0.1-1-x86_64.pkg.tar.zst
 seuil setup
 ```
 
@@ -83,7 +88,7 @@ with `sudo pacman -U <file>`.
 
 ```sh
 sudo pacman -S --needed base-devel pkg-config dbus bluez bluez-utils \
-    pipewire pipewire-pulse libpulse playerctl rust
+    bluez-deprecated-tools pipewire pipewire-pulse libpulse playerctl rust
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil/packaging/aur
 makepkg -si
@@ -103,14 +108,14 @@ Run these commands on recent Debian or Ubuntu (22.04+).
 ```sh
 sudo apt update && sudo apt install -y bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3
 mkdir -p ~/.local/bin
-curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 ~/.local/bin/seuil setup
 ```
 
 Substitute the latest tag from the
 [releases page](https://github.com/Eddie02345/seuil/releases) if it is not
-`v1.0.0`.
+`v1.0.1`.
 
 #### Build from source via `./install.sh`
 
@@ -130,9 +135,9 @@ Installing Rust with `rustup` is recommended on Debian/Ubuntu: the distro
 #### Prebuilt binary (no Rust toolchain)
 
 ```sh
-sudo dnf install -y bluez pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
+sudo dnf install -y bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
 mkdir -p ~/.local/bin
-curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.0/seuil-v1.0.0-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 ~/.local/bin/seuil setup
 ```
@@ -140,7 +145,7 @@ tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
 #### Build from source via `./install.sh`
 
 ```sh
-sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez pipewire pipewire-utils pipewire-pulseaudio playerctl
+sudo dnf install -y gcc pkg-config dbus-devel openssl-devel rust cargo bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl
 git clone https://github.com/Eddie02345/seuil.git
 cd seuil
 ./install.sh
@@ -152,28 +157,49 @@ The wizard (`seuil setup`, `seuil setup --reauth`):
 
 1. enrolls the Samsung account (browser PKCE login and cloud certificate
    enrollment) when no credentials exist or `--reauth` is passed;
-2. lists paired BlueZ devices with a likely role (phone or Buds) and asks for
-   two numbers;
-3. writes `~/.config/seuil/config.toml`, installs
+2. registers a temporary `ms-app://` handler, opens the sign-in page, and
+   waits for the browser callback or a URL pasted into the terminal;
+3. lists paired BlueZ devices with a likely role (phone or Buds) and asks for
+   two list numbers. Press Enter to accept the default shown in brackets;
+4. writes `~/.config/seuil/config.toml`, installs
    `~/.config/systemd/user/seuil.service`, reloads systemd, and enables and
    starts the service.
 
+Setup accepts `--bt-address`, `--adapter`, and `--auth-server` before or after
+the subcommand. `--debug` and `RUST_LOG` also apply to setup.
+
 ### Completing the Samsung Account sign-in on Linux
 
-If the browser stays on a loading spinner after you sign in at
-`account.samsung.com`, the login succeeded. Samsung then redirects the browser
-to its Windows callback URI (`ms-app://...`), which Linux browsers block. The
-DevTools console logs `Prevented navigation to "ms-app://..."`. Paste that
-callback URL back into `seuil setup`:
+`seuil setup` registers Seuil as a temporary handler for Samsung's
+`ms-app://` callback and opens the sign-in page in your default browser. After
+you sign in:
 
-1. Open DevTools Console on that tab: `Ctrl + Shift + K` in Firefox,
+- If the browser asks to open **Seuil Auth Callback**, choose **Open**. Seuil
+  receives the callback over a local Unix socket and continues automatically.
+
+If the browser stays on a loading spinner, or logs
+`Prevented navigation to "ms-app://..." due to an unknown protocol`, it blocked
+the redirect. The URL is still in the DevTools console:
+
+1. Open the Console: `Ctrl + Shift + K` in Firefox or Zen,
    `Ctrl + Shift + J` in Chrome, Chromium, or Brave.
-2. Find the `Prevented navigation to "ms-app://s-1-15-2-..."` warning. Press
-   `Ctrl + R` if the 5-minute code expired; that loads a fresh link.
-3. Copy the full `ms-app://...` URL without the surrounding quotes.
-4. Click back into the terminal running `seuil setup`, paste with
-   `Ctrl + Shift + V`, and press `Enter`. Do not paste it into the browser
-   address bar.
+2. Find the `ms-app://s-1-15-2-...` entry. Copy the full URL or the whole
+   console line.
+3. Paste it into the terminal running `seuil setup` and press Enter.
+   Surrounding quotes are fine. Do not paste it into the browser address bar.
+4. If the code expired, restart `seuil setup --reauth` to generate a new one.
+
+The temporary handler and socket are removed when sign-in finishes, fails, or
+you press `Ctrl+C`. A browser that was already running can cache protocol
+handlers, so the console paste path works even when the automatic handoff does
+not.
+
+If setup reports `could not read the address of hci0`, pass the adapter MAC
+explicitly. The flag works before or after the subcommand:
+
+```sh
+seuil setup --bt-address XX:XX:XX:XX:XX:XX
+```
 
 Both devices must be paired in `bluetoothctl` first, and you need a Samsung
 account.
@@ -183,10 +209,16 @@ account.
 ```
 seuil                 # run the daemon (systemd does this at login)
 seuil setup           # interactive setup
+seuil setup --reauth  # re-enroll the Samsung account
+seuil setup --bt-address XX:XX:XX:XX:XX:XX   # override adapter MAC detection
 seuil --phone AA:BB:CC:DD:EE:FF --buds 11:22:33:44:55:66   # flags override config
 seuil --auth-login    # enroll or re-enroll the account
 seuil --debug         # verbose logs
+RUST_LOG=debug seuil  # verbose logs via the environment
 ```
+
+`--debug` forces debug logging. `RUST_LOG` sets a custom filter when `--debug`
+is not passed. Both apply to `seuil setup`.
 
 Configuration lives in `~/.config/seuil/config.toml`:
 
@@ -205,11 +237,30 @@ AES-256-GCM encrypted with a local key.
 | Symptom | Check |
 |---|---|
 | Service exits immediately | `journalctl --user -u seuil.service -n 50`; missing phone/Buds MACs point at `config.toml` |
+| `No such file or directory` during SDP query | `sdptool` is missing; install `bluez-deprecated-tools` on Arch, `bluez` on Debian/Ubuntu, or `bluez-deprecated` on Fedora |
+| `could not read the address of hci0` | Pass the adapter MAC: `seuil setup --bt-address XX:XX:XX:XX:XX:XX` |
 | `userKeyDecrypt fail` on the phone | Re-enroll: `seuil setup --reauth` (the account key no longer matches) |
 | `Ctx={lost}` in phone logs | The advertisement type-1/type-3 records are malformed or the phone has not scanned yet; confirm the daemon advertised a 26-byte payload |
 | `os error 107` / `104` on the CoC | The phone closed the app-side socket; check the phone's `mcfds` logcat, then the keepalive and reconnect ticks in the daemon log |
+| `CONTINUITY_MSG_SPP NOT found on phone` | The phone is not exposing the Continuity SPP service yet; see the phone checklist below |
 | Buds never move | BlueZ must see the Buds as paired; the phone must be unlocked once after boot for Auto Switch |
 | No playback trigger | `playerctl -a status` should show `Playing`; browsers keep idle PipeWire nodes, so MPRIS is the reliable signal |
+
+### Phone does not answer
+
+If the log repeats `CONTINUITY_MSG_SPP NOT found on phone`, or the phone sends
+nothing after the ready event, check these on the phone:
+
+- Auto Switch / Continuity is enabled for the Buds.
+- The phone and the Buds are signed into the same Samsung account.
+- The Linux machine was enrolled with that same Samsung account.
+- The phone has been unlocked at least once since boot.
+- The Samsung Continuity service (`com.samsung.android.mcfds`) is running and
+  allowed to run in the background.
+- The Buds are connected to the phone before testing the handoff.
+
+The first daemon start can take a few minutes to settle while the phone
+discovers and authenticates the new Linux peer.
 
 Logs: `journalctl --user -u seuil.service -f`.
 
