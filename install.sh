@@ -2,10 +2,19 @@
 # Seuil installer: verify dependencies, build, install, and launch setup.
 set -euo pipefail
 
+if [ "${EUID}" = 0 ]; then
+    echo "Please do not run this script as root"
+    exit
+fi
+
 NAME="seuil"
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-BIN_DIR="${HOME}/.local/bin"
+BIN_DIR="${BIN_DIR:-${HOME}/.local/bin}"
 BIN="${BIN_DIR}/${NAME}"
+SERV_DIR="${SERV_DIR:-${HOME}/.config/systemd/user}"
+SERVICE="${SERV_DIR}/${NAME}.service"
+
+echo $SERVICE $BIN
 
 missing=()
 check() {
@@ -54,6 +63,26 @@ cargo build --release --locked --manifest-path "${ROOT}/daemon/Cargo.toml"
 
 echo "Installing to ${BIN}"
 install -Dm755 "${ROOT}/daemon/target/release/${NAME}" "${BIN}"
+
+echo "Creating ${SERVICE}"
+cat > ${SERVICE} << EOF
+[Unit]
+Description=Seuil Samsung Continuity daemon (Galaxy Buds Auto Switch)
+After=pipewire.service bluetooth.target
+Wants=pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/seuil
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+ExecStartPre=-/usr/bin/bluetoothctl show
+
+[Install]
+WantedBy=default.target
+EOF
 
 echo
 echo "Launching ${NAME} setup"

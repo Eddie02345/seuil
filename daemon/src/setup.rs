@@ -5,18 +5,13 @@
 //! installs and starts the systemd user unit.
 
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
 
 use crate::auth::Credentials;
-use crate::{config, Cli};
-
-/// Systemd unit name, also the service name.
-const SERVICE: &str = "seuil.service";
+use crate::{Cli, config};
 
 /// Which role a paired device most likely plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +102,7 @@ pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
     let buds = devices[buds_index].address.clone();
 
     let dir = config::config_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let config_path = dir.join("config.toml");
     let text = format!(
         "# Seuil configuration\nphone_mac = \"{phone}\"\nbuds_mac = \"{buds}\"\n# adapter = \"{}\"\n# discover = true\n",
@@ -118,9 +112,9 @@ pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
         .with_context(|| format!("write {}", config_path.display()))?;
     println!("\nWrote {}", config_path.display());
 
-    install_service()?;
-    println!("Installed and started {SERVICE}");
-    println!("Check the connection with: journalctl --user -u {SERVICE} -f");
+    println!("Setup completed!");
+    println!("if you wish to, enable and start the systemd service with:");
+    println!("systemctl --user enable --now seuil.service");
     Ok(())
 }
 
@@ -216,73 +210,6 @@ async fn prompt_index(label: &str, suggested: Option<usize>, len: usize) -> Resu
     }
 }
 
-/// Writes the systemd user unit and enables it.
-fn install_service() -> Result<()> {
-    let unit_path = unit_path()?;
-    if let Some(parent) = unit_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&unit_path, unit_text())
-        .with_context(|| format!("write {}", unit_path.display()))?;
-
-    let bin = home_dir()?.join(".local/bin/seuil");
-    if !bin.exists() {
-        println!(
-            "warning: {} is missing; run ./install.sh first",
-            bin.display()
-        );
-    }
-
-    run_systemctl(&["--user", "daemon-reload"])?;
-    run_systemctl(&["--user", "enable", "--now", SERVICE])?;
-    Ok(())
-}
-
-/// Path of the user unit.
-pub fn unit_path() -> Result<PathBuf> {
-    Ok(config::config_dir()
-        .parent()
-        .map(|base| base.join("systemd/user").join(SERVICE))
-        .unwrap_or_else(|| PathBuf::from(SERVICE)))
-}
-
-/// Contents of the user unit.
-pub fn unit_text() -> String {
-    "[Unit]\n\
-         Description=Seuil Samsung Continuity daemon (Galaxy Buds Auto Switch)\n\
-         After=pipewire.service bluetooth.target\n\
-         Wants=pipewire.service\n\
-         PartOf=graphical-session.target\n\
-         \n\
-         [Service]\n\
-         Type=simple\n\
-         ExecStart=%h/.local/bin/seuil\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
-         Environment=RUST_LOG=info\n\
-         ExecStartPre=-/usr/bin/bluetoothctl show\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n".to_string()
-}
-
-fn run_systemctl(args: &[&str]) -> Result<()> {
-    let status = Command::new("systemctl")
-        .args(args)
-        .status()
-        .context("run systemctl")?;
-    if !status.success() {
-        anyhow::bail!("systemctl {} exited with {status}", args.join(" "));
-    }
-    Ok(())
-}
-
-fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,12 +229,5 @@ mod tests {
     #[test]
     fn classifies_unknown_devices_as_other() {
         assert_eq!(classify(Some(0x001F0100), "Keyboard"), Role::Other);
-    }
-
-    #[test]
-    fn unit_starts_the_rebranded_binary() {
-        let unit = unit_text();
-        assert!(unit.contains("ExecStart=%h/.local/bin/seuil"));
-        assert!(unit.contains("After=pipewire.service bluetooth.target"));
     }
 }
