@@ -71,7 +71,7 @@ by Cargo.
 ### Arch Linux
 
 The package is published with each GitHub release as a prebuilt
-`.pkg.tar.zst`, so no AUR account is needed.
+`.pkg.tar.zst`. Alternatively, you can install the [`seuil-git` AUR package](https://aur.archlinux.org/packages/seuil-git).
 
 #### Prebuilt package
 
@@ -94,10 +94,6 @@ cd seuil/packaging/aur
 makepkg -si
 seuil setup
 ```
-
-AUR publishing (`paru -S seuil`, `yay -S seuil`) is queued until new AUR
-account registration reopens. The package recipe in `packaging/aur` is already
-ready and builds the same binary the release asset contains.
 
 ### Debian / Ubuntu
 
