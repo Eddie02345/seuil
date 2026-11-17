@@ -258,7 +258,8 @@ pub async fn run_command_channel(
                     handler = packet.handler,
                     command = command.command_id,
                     msg_type = command.msg_type,
-                    "command received"
+                    payload = %hex::encode(&command.payload),
+                    "CoC command received from phone"
                 );
                 // Channel keepalive: answer a keep request with the same id and
                 // type 2, mirroring the phone's protocol.
@@ -278,6 +279,27 @@ pub async fn run_command_channel(
                     .await
                     {
                         warn!("keepalive reply failed: {error:#}");
+                        break;
+                    }
+                    continue;
+                }
+                if packet.handler == HANDLER_AUTO_SWITCH
+                    && command.command_id == COMMAND_GET_DEVICE_STATE
+                    && command.msg_type == TYPE_REQUEST
+                {
+                    if let Err(error) = send_command(
+                        &mut writer,
+                        &session_key,
+                        &mut sequence,
+                        HANDLER_AUTO_SWITCH,
+                        COMMAND_GET_DEVICE_STATE,
+                        TYPE_RESPONSE,
+                        // Observed ready/available ack expected by One UI mcfds.
+                        vec![1],
+                    )
+                    .await
+                    {
+                        warn!("device state reply failed: {error:#}");
                         break;
                     }
                     continue;

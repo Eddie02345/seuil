@@ -68,7 +68,11 @@ impl HandoffStateMachine {
             AudioState::Streaming => {
                 if event.address == self.config.phone_address {
                     self.phone_audio_active = true;
-                    if self.state == HandoffState::LinuxActive && self.config.auto_switch_enabled {
+                    if matches!(
+                        self.state,
+                        HandoffState::LinuxActive | HandoffState::HandingOffToLinux
+                    ) && self.config.auto_switch_enabled
+                    {
                         return Some(HandoffAction::YieldToPhone);
                     }
                 }
@@ -133,12 +137,17 @@ impl HandoffStateMachine {
 
     pub fn on_local_media_stop(&mut self) -> Option<HandoffAction> {
         self.local_media_playing = false;
+        None
+    }
 
-        if self.state == HandoffState::LinuxActive {
+    pub fn set_buds_connected(&mut self, connected: bool) {
+        if connected {
+            if self.state != HandoffState::HandingOffToPhone {
+                self.state = HandoffState::LinuxActive;
+            }
+        } else if self.state == HandoffState::LinuxActive {
             self.state = HandoffState::Idle;
         }
-
-        None
     }
 
     pub fn on_handoff_complete(&mut self, to_linux: bool) {
@@ -153,11 +162,62 @@ impl HandoffStateMachine {
 }
 
 /// Actions the daemon should take during a handoff
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandoffAction {
     YieldToPhone,
     ClaimBuds,
     PhoneReady,
     SetSeamless(bool),
     SendHandoffCommand(Vec<u8>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{BleHeader, DeviceType};
+
+    fn sample_config() -> HandoffConfig {
+        HandoffConfig {
+            phone_address: "EC:B5:50:10:4E:B0".into(),
+            buds_address: "E8:C9:13:A1:B9:1C".into(),
+            auto_switch_enabled: true,
+            priority: DevicePriority::PhoneWins,
+        }
+    }
+
+    fn sample_adv(address: &str, audio_state: AudioState) -> BleAdvEvent {
+        BleAdvEvent {
+            address: address.into(),
+            address_type: bluer::AddressType::LePublic,
+            rssi: -50,
+            header: BleHeader {
+                version: 0x02,
+                subtype: 0x18,
+                flags: 0x27,
+            },
+            device_type: DeviceType::Phone,
+            context: None,
+            audio_state,
+            coc_psm: Some(0x0081),
+            raw_data: vec![],
+        }
+    }
+
+    #[test]
+    fn yields_to_phone_when_linux_owns_buds_and_phone_streams() {
+        let mut sm = HandoffStateMachine::new(sample_config());
+        sm.set_buds_connected(true);
+        // Even if local media stops later, Linux still holds the Buds connection.
+        sm.on_local_media_stop();
+
+        let ev = sample_adv("EC:B5:50:10:4E:B0", AudioState::Streaming);
+        assert_eq!(sm.on_ble_event(&ev), Some(HandoffAction::YieldToPhone));
+    }
+
+    #[test]
+    fn does_not_yield_when_buds_not_connected_to_linux() {
+        let mut sm = HandoffStateMachine::new(sample_config());
+        let ev = sample_adv("EC:B5:50:10:4E:B0", AudioState::Streaming);
+        assert_eq!(sm.on_ble_event(&ev), None);
+    }
 }

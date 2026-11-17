@@ -172,16 +172,17 @@ async fn main() -> Result<()> {
         cli.bt_address.clone(),
     );
 
-    // Register SDP record
-    sdp::register_sdp_record().await?;
-
-    // Query phone SDP records
-    let phone_sdp = sdp::query_remote_sdp(&cli.phone).await?;
-    let continuity_found = phone_sdp.iter().any(|r| r.is_continuity);
-    if continuity_found {
-        info!("CONTINUITY_MSG_SPP found on phone SDP records");
-    } else {
-        warn!("CONTINUITY_MSG_SPP NOT found on phone - phone may need Samsung MCF app running");
+    // Only probe legacy Classic SDP records when --debug is enabled; One UI 6+
+    // uses BLE L2CAP CoC exclusively, and sdptool adds ~1s of startup latency.
+    if cli.debug {
+        sdp::register_sdp_record().await?;
+        let phone_sdp = sdp::query_remote_sdp(&cli.phone).await?;
+        let continuity_found = phone_sdp.iter().any(|r| r.is_continuity);
+        if continuity_found {
+            info!("CONTINUITY_MSG_SPP found on phone SDP records");
+        } else {
+            debug!("CONTINUITY_MSG_SPP not found on phone SDP records (using BLE L2CAP CoC)");
+        }
     }
 
     // Create event channels
@@ -257,13 +258,22 @@ async fn main() -> Result<()> {
         let adv_id = ble::coc_session::advertisement_id(address);
         let playback = local_playback.clone();
         let state = switch_state.clone();
+        let sm = state_machine.clone();
         tokio::spawn(async move {
             let Ok(buds_device) = buds_string.parse() else {
                 warn!(%buds_string, "Could not parse the Buds address for ownership tracking");
                 return;
             };
-            watch_buds_ownership(watcher_adapter, buds_device, adv_id, advertise_tx, playback, state)
-                .await;
+            watch_buds_ownership(
+                watcher_adapter,
+                buds_device,
+                adv_id,
+                advertise_tx,
+                playback,
+                state,
+                sm,
+            )
+            .await;
         });
     }
     let mut l2cap_attempts: HashMap<String, Instant> = HashMap::new();
@@ -280,10 +290,57 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             Some(ble_event) = ble_rx.recv() => {
+                if ble_event.address.eq_ignore_ascii_case(&cli.buds) {
+                    switch_state.lock().await.last_connect_failure = None;
+                }
+                if ble_event.address.eq_ignore_ascii_case(&cli.phone) {
+                    let is_ble_call = ble_event.context.is_some_and(|ctx| ctx.device_state == 2);
+                    if is_ble_call {
+                        let currently_playing =
+                            local_playback.load(std::sync::atomic::Ordering::Relaxed);
+                        switch_state
+                            .lock()
+                            .await
+                            .mark_call_started(Instant::now(), currently_playing);
+                    }
+                    let phone_now_idle = ble_event.audio_state == AudioState::Idle
+                        && ble_event.context.is_some_and(|ctx| ctx.device_state == 0);
+                    let should_resume = if phone_now_idle {
+                        switch_state.lock().await.on_phone_call_ended()
+                    } else {
+                        false
+                    };
+                    if should_resume {
+                        info!("Phone call ended; resuming local media and requesting Buds back");
+                        if let Some(buds_address) = buds_address {
+                            request_buds_switch(
+                                &adapter,
+                                buds_address,
+                                &command_channels,
+                                &*switch_state.lock().await,
+                            )
+                            .await;
+                        }
+                        if let Err(e) = media::MprisController::resume_all().await {
+                            warn!("Could not resume MPRIS players after phone call: {e}");
+                        }
+                    }
+                }
                 let mut sm = state_machine.lock().await;
                 if let Some(action) = sm.on_ble_event(&ble_event) {
-                    handle_action(action, &cli.dry_run).await;
+                    handle_action(
+                        action,
+                        &cli.dry_run,
+                        &adapter,
+                        buds_address,
+                        &switch_state,
+                        &local_playback,
+                        &advertise_state_tx,
+                        &mut sm,
+                    )
+                    .await;
                 }
+                drop(sm);
                 if let Some(psm) = ble_event.coc_psm {
                     last_coc_target = Some((ble_event.clone(), psm));
                     maybe_connect_coc(
@@ -303,7 +360,17 @@ async fn main() -> Result<()> {
             Some(rfcomm_event) = rfcomm_rx.recv() => {
                 let mut sm = state_machine.lock().await;
                 if let Some(action) = sm.on_rfcomm_event(&rfcomm_event) {
-                    handle_action(action, &cli.dry_run).await;
+                    handle_action(
+                        action,
+                        &cli.dry_run,
+                        &adapter,
+                        buds_address,
+                        &switch_state,
+                        &local_playback,
+                        &advertise_state_tx,
+                        &mut sm,
+                    )
+                    .await;
                 }
             }
             Some((peer, incoming)) = command_in_rx.recv() => {
@@ -315,6 +382,9 @@ async fn main() -> Result<()> {
                         incoming,
                         &command_channels,
                         &mut *switch_state.lock().await,
+                        &state_machine,
+                        &local_playback,
+                        &advertise_state_tx,
                     )
                     .await;
                 }
@@ -389,6 +459,14 @@ async fn main() -> Result<()> {
                         let _ = tx.try_send(ble::AdvUpdate::Audio(state));
                     }
                 }
+                let playback_allowed = if is_playback_start(&media_event) {
+                    switch_state.lock().await.may_request(Instant::now())
+                } else {
+                    true
+                };
+                if !playback_allowed {
+                    continue;
+                }
                 // Ask the phone to hand the Buds over when Linux starts playing.
                 if is_playback_start(&media_event)
                     && let Some(buds_address) = buds_address {
@@ -410,7 +488,17 @@ async fn main() -> Result<()> {
                     _ => None,
                 };
                 if let Some(action) = action {
-                    handle_action(action, &cli.dry_run).await;
+                    handle_action(
+                        action,
+                        &cli.dry_run,
+                        &adapter,
+                        buds_address,
+                        &switch_state,
+                        &local_playback,
+                        &advertise_state_tx,
+                        &mut sm,
+                    )
+                    .await;
                 }
             }
             else => {
@@ -700,17 +788,25 @@ fn handshake_credentials() -> Option<HandshakeCredentials> {
 /// any, must be older than [`COC_RETRY_INTERVAL`]. The channel-present check is
 /// done by the caller against the open-channel map.
 fn attempt_allowed(last_attempt: Option<Instant>, now: Instant) -> bool {
-    !last_attempt.is_some_and(|attempt| now.duration_since(attempt) < COC_RETRY_INTERVAL)
+    last_attempt.is_none_or(|attempt| now.duration_since(attempt) >= COC_RETRY_INTERVAL)
 }
 
 /// Cooldown after yielding the Buds to the phone. Suppresses a local playback
 /// start (for example a notification sound) from immediately stealing them back.
 const YIELD_COOLDOWN: Duration = Duration::from_secs(5);
 
+/// Cooldown after failing to connect the Buds A2DP profile (for example when
+/// the Buds are asleep inside the closed charging case).
+const CONNECT_FAILURE_COOLDOWN: Duration = Duration::from_secs(45);
+
 /// Upper bound on an active call session guard. A reason-2 handoff marks the
 /// session as a phone call; the guard clears on the phone's response and this
 /// timeout protects against a lost response.
 const CALL_GUARD: Duration = Duration::from_secs(30 * 60);
+
+/// Window within which a direct HFP disconnect while local media was playing is
+/// correlated with a subsequent phone `AudioState::Call` advertisement.
+const CALL_YIELD_CORRELATION: Duration = Duration::from_secs(15);
 
 /// A2DP Sink profile UUID (`0000110b-...`), the audio link the Buds use.
 const A2DP_SINK_UUID: &str = "0000110b-0000-1000-8000-00805f9b34fb";
@@ -726,6 +822,14 @@ struct SwitchState {
     /// While set in the future, a phone call owns the Buds and local playback
     /// starts are ignored.
     call_active_until: Option<Instant>,
+    /// When the last A2DP connect attempt to the Buds failed (e.g. Buds in case).
+    last_connect_failure: Option<Instant>,
+    /// When local playback was paused due to the Buds leaving Linux.
+    was_playing_on_yield: Option<Instant>,
+    /// Whether the phone is currently in a voice/video call.
+    phone_in_call: bool,
+    /// Whether Linux playback should be resumed when the phone call ends.
+    resume_after_call: bool,
 }
 
 impl SwitchState {
@@ -733,6 +837,36 @@ impl SwitchState {
     fn call_active(&self, now: Instant) -> bool {
         self.call_active_until
             .is_some_and(|until| now < until)
+    }
+
+    /// Records that a phone call started and remembers whether Linux was
+    /// playing media when the call interrupted it.
+    fn mark_call_started(&mut self, now: Instant, currently_playing: bool) {
+        let recently_yielded_playing = self
+            .was_playing_on_yield
+            .is_some_and(|t| now.duration_since(t) <= CALL_YIELD_CORRELATION);
+        if currently_playing || recently_yielded_playing {
+            self.resume_after_call = true;
+        }
+        self.phone_in_call = true;
+        self.call_active_until = Some(now + CALL_GUARD);
+    }
+
+    /// Clears call state when the phone returns to `AudioState::Idle` and
+    /// returns `true` when local media should be resumed and the Buds reclaimed.
+    fn on_phone_call_ended(&mut self) -> bool {
+        if !self.phone_in_call {
+            return false;
+        }
+        self.phone_in_call = false;
+        self.call_active_until = None;
+        self.was_playing_on_yield = None;
+        if self.resume_after_call {
+            self.resume_after_call = false;
+            self.last_yield = None;
+            return true;
+        }
+        false
     }
 
     /// True when a local playback start may ask for the Buds.
@@ -748,7 +882,40 @@ impl SwitchState {
             info!("Ignoring local playback start: within the yield cooldown");
             return false;
         }
+        if self
+            .last_connect_failure
+            .is_some_and(|failed| now.duration_since(failed) < CONNECT_FAILURE_COOLDOWN)
+        {
+            info!("Ignoring local playback start: Buds appear unreachable (in case or offline)");
+            return false;
+        }
         true
+    }
+}
+
+/// Disconnects A2DP and HFP profiles from the Buds so the phone can claim them.
+async fn disconnect_buds_profiles(adapter: &Arc<Adapter>, buds_address: [u8; 6]) {
+    let buds_string = format!(
+        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        buds_address[0],
+        buds_address[1],
+        buds_address[2],
+        buds_address[3],
+        buds_address[4],
+        buds_address[5]
+    );
+    if let Ok(device) = adapter.device(buds_string.parse().unwrap()) {
+        for uuid in [A2DP_SINK_UUID, HFP_UUID] {
+            let Ok(uuid) = uuid::Uuid::parse_str(uuid) else {
+                continue;
+            };
+            if let Err(error) = device.disconnect_profile(&uuid).await {
+                debug!(
+                    profile = %uuid,
+                    "Could not disconnect Buds profile: {error}"
+                );
+            }
+        }
     }
 }
 
@@ -813,6 +980,7 @@ async fn request_buds_switch(
 }
 
 /// Applies Auto Switch traffic from the phone.
+#[allow(clippy::too_many_arguments)]
 async fn handle_incoming_command(
     adapter: &Arc<Adapter>,
     buds_address: [u8; 6],
@@ -822,6 +990,9 @@ async fn handle_incoming_command(
         tokio::sync::Mutex<HashMap<String, mpsc::Sender<ble::coc_session::CommandRequest>>>,
     >,
     state: &mut SwitchState,
+    state_machine: &Arc<tokio::sync::Mutex<HandoffStateMachine>>,
+    local_playback: &Arc<std::sync::atomic::AtomicBool>,
+    advertise_state_tx: &Option<mpsc::Sender<ble::AdvUpdate>>,
 ) {
     match incoming {
         ble::coc_session::IncomingCommand::BudsSwitchRequest {
@@ -840,34 +1011,22 @@ async fn handle_incoming_command(
 
             // Release the audio links first: the phone starts its own connection
             // when it processes the response, so an active Linux link would race.
-            let buds_string = format!(
-                "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                buds_address[0],
-                buds_address[1],
-                buds_address[2],
-                buds_address[3],
-                buds_address[4],
-                buds_address[5]
-            );
-            if let Ok(device) = adapter.device(buds_string.parse().unwrap()) {
-                for uuid in [A2DP_SINK_UUID, HFP_UUID] {
-                    let Ok(uuid) = uuid::Uuid::parse_str(uuid) else {
-                        continue;
-                    };
-                    if let Err(error) = device.disconnect_profile(&uuid).await {
-                        debug!(
-                            profile = %uuid,
-                            "Could not disconnect Buds profile: {error}"
-                        );
-                    }
-                }
-            }
+            disconnect_buds_profiles(adapter, buds_address).await;
 
-            state.last_yield = Some(Instant::now());
+            let was_playing = local_playback.swap(false, std::sync::atomic::Ordering::Relaxed);
+            if let Some(tx) = advertise_state_tx {
+                let _ = tx.try_send(ble::AdvUpdate::Audio(AudioState::Idle));
+            }
+            let now = Instant::now();
+            state.last_yield = Some(now);
+            if was_playing {
+                state.was_playing_on_yield = Some(now);
+            }
             if reason == ble::coc_session::REASON_CALL {
-                state.call_active_until = Some(Instant::now() + CALL_GUARD);
+                state.mark_call_started(now, was_playing);
                 info!("Phone call session owns the Buds; local playback triggers paused");
             }
+            state_machine.lock().await.on_handoff_complete(false);
 
             let response = ble::coc_session::CommandRequest::SwitchResponse {
                 result: 1,
@@ -912,8 +1071,16 @@ async fn handle_incoming_command(
                 return;
             };
             info!(address = %buds_string, "Pulling the Buds A2DP link to Linux");
-            if let Err(error) = device.connect_profile(&uuid).await {
-                warn!(address = %buds_string, "Could not connect the A2DP profile: {error}");
+            match device.connect_profile(&uuid).await {
+                Ok(()) => {
+                    state.last_connect_failure = None;
+                    state_machine.lock().await.on_handoff_complete(true);
+                }
+                Err(error) => {
+                    warn!(address = %buds_string, "Could not connect the A2DP profile: {error}");
+                    state.last_connect_failure = Some(Instant::now());
+                    state_machine.lock().await.set_buds_connected(false);
+                }
             }
         }
     }
@@ -960,9 +1127,11 @@ async fn maybe_connect_coc(
         // daemon restart.
         let credentials = handshake_credentials();
 
-        // Try to pair/bond with the device first
-        info!(address = %address, "Attempting BLE pairing");
-        if let Ok(device) = adapter.device(address.parse().unwrap()) {
+        // Try to pair/bond with the device first only when not already paired.
+        if let Ok(device) = adapter.device(address.parse().unwrap())
+            && !device.is_paired().await.unwrap_or(false)
+        {
+            info!(address = %address, "Attempting BLE pairing");
             match device.pair().await {
                 Ok(_) => info!(address = %address, "BLE pairing successful"),
                 Err(e) => warn!(address = %address, "BLE pairing failed: {}", e),
@@ -1056,6 +1225,7 @@ async fn watch_buds_ownership(
     tx: mpsc::Sender<ble::AdvUpdate>,
     local_playback: Arc<std::sync::atomic::AtomicBool>,
     switch_state: Arc<tokio::sync::Mutex<SwitchState>>,
+    state_machine: Arc<tokio::sync::Mutex<HandoffStateMachine>>,
 ) {
     use futures::StreamExt;
 
@@ -1072,13 +1242,17 @@ async fn watch_buds_ownership(
 
         let connected = device.is_connected().await.unwrap_or(false);
         if last != Some(connected) {
+            let was_connected = last == Some(true);
             last = Some(connected);
+            state_machine.lock().await.set_buds_connected(connected);
             let buds = connected.then_some(ble::BudsAdRecord {
                 adv_id,
                 flags: ble::BUDS_AD_FLAGS_CONNECTED,
             });
             info!(%buds_address, connected, "Buds ownership changed; updating the advertisement");
-            if !connected {
+            if connected {
+                switch_state.lock().await.last_connect_failure = None;
+            } else if was_connected {
                 release_local_playback(&local_playback, &switch_state).await;
             }
             if tx.send(ble::AdvUpdate::Buds(buds)).await.is_err() {
@@ -1102,12 +1276,15 @@ async fn watch_buds_ownership(
                     continue;
                 }
                 last = Some(connected);
+                state_machine.lock().await.set_buds_connected(connected);
                 let buds = connected.then_some(ble::BudsAdRecord {
                     adv_id,
                     flags: ble::BUDS_AD_FLAGS_CONNECTED,
                 });
                 info!(%buds_address, connected, "Buds ownership changed; updating the advertisement");
-                if !connected {
+                if connected {
+                    switch_state.lock().await.last_connect_failure = None;
+                } else {
                     release_local_playback(&local_playback, &switch_state).await;
                 }
                 if tx.send(ble::AdvUpdate::Buds(buds)).await.is_err() {
@@ -1125,13 +1302,22 @@ async fn release_local_playback(
     local_playback: &Arc<std::sync::atomic::AtomicBool>,
     switch_state: &Arc<tokio::sync::Mutex<SwitchState>>,
 ) {
-    if local_playback.swap(false, std::sync::atomic::Ordering::Relaxed) {
+    let was_playing = local_playback.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if was_playing {
         info!("Buds left Linux; pausing local media to reset the playback edge");
         if let Err(error) = media::MprisController::pause_all().await {
             warn!("Could not pause MPRIS players after the Buds left: {error}");
         }
     }
-    switch_state.lock().await.last_yield = Some(Instant::now());
+    let now = Instant::now();
+    let mut state = switch_state.lock().await;
+    state.last_yield = Some(now);
+    if was_playing {
+        state.was_playing_on_yield = Some(now);
+        if state.phone_in_call {
+            state.resume_after_call = true;
+        }
+    }
 }
 
 /// Finds a paired BlueZ device whose name mentions the Buds.
@@ -1151,7 +1337,17 @@ async fn discover_buds_address(adapter: &Arc<Adapter>) -> Option<String> {
     None
 }
 
-async fn handle_action(action: HandoffAction, dry_run: &bool) {
+#[allow(clippy::too_many_arguments)]
+async fn handle_action(
+    action: HandoffAction,
+    dry_run: &bool,
+    adapter: &Arc<Adapter>,
+    buds_address: Option<[u8; 6]>,
+    switch_state: &Arc<tokio::sync::Mutex<SwitchState>>,
+    local_playback: &Arc<std::sync::atomic::AtomicBool>,
+    advertise_state_tx: &Option<mpsc::Sender<ble::AdvUpdate>>,
+    sm: &mut HandoffStateMachine,
+) {
     if *dry_run {
         info!("[DRY RUN] Would execute action: {:?}", action);
         return;
@@ -1164,7 +1360,24 @@ async fn handle_action(action: HandoffAction, dry_run: &bool) {
             if let Err(e) = media::MprisController::pause_all().await {
                 error!("Failed to pause MPRIS players: {}", e);
             }
-            // TODO: Disconnect A2DP / yield the audio link
+            if let Some(buds_address) = buds_address {
+                disconnect_buds_profiles(adapter, buds_address).await;
+            }
+            let was_playing = local_playback.swap(false, std::sync::atomic::Ordering::Relaxed);
+            if let Some(tx) = advertise_state_tx {
+                let _ = tx.try_send(ble::AdvUpdate::Audio(AudioState::Idle));
+            }
+            let now = Instant::now();
+            let mut state = switch_state.lock().await;
+            state.last_yield = Some(now);
+            if was_playing {
+                state.was_playing_on_yield = Some(now);
+                if state.phone_in_call {
+                    state.resume_after_call = true;
+                }
+            }
+            drop(state);
+            sm.on_handoff_complete(false);
             info!("Phone should now connect to Buds");
         }
         HandoffAction::ClaimBuds => {
@@ -1213,5 +1426,37 @@ mod tests {
             Some(now - COC_RETRY_INTERVAL - Duration::from_secs(1)),
             now
         ));
+    }
+
+    #[test]
+    fn connect_failure_cooldown_blocks_until_elapsed_or_cleared() {
+        let now = Instant::now();
+        let mut state = SwitchState {
+            last_connect_failure: Some(now),
+            ..Default::default()
+        };
+        assert!(!state.may_request(now + Duration::from_secs(10)));
+        assert!(state.may_request(now + CONNECT_FAILURE_COOLDOWN + Duration::from_secs(1)));
+
+        state.last_connect_failure = None;
+        assert!(state.may_request(now));
+    }
+
+    #[test]
+    fn call_interruption_resumes_when_phone_returns_to_idle() {
+        let now = Instant::now();
+        let mut state = SwitchState {
+            was_playing_on_yield: Some(now),
+            ..Default::default()
+        };
+        state.mark_call_started(now + Duration::from_secs(2), false);
+        assert!(state.phone_in_call);
+        assert!(state.resume_after_call);
+        assert!(!state.may_request(now + Duration::from_secs(3)));
+
+        assert!(state.on_phone_call_ended());
+        assert!(!state.phone_in_call);
+        assert!(!state.resume_after_call);
+        assert!(state.may_request(now + Duration::from_secs(4)));
     }
 }
