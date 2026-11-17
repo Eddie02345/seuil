@@ -27,6 +27,7 @@ pub struct FileConfig {
     pub phone_mac: Option<String>,
     pub buds_mac: Option<String>,
     pub adapter: Option<String>,
+    pub device_name: Option<String>,
     /// Allow the enrolled account list and BlueZ to fill missing MACs.
     #[serde(default = "default_discover")]
     pub discover: bool,

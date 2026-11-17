@@ -166,6 +166,11 @@ async fn main() -> Result<()> {
         );
     }
     info!("Using Buds address {}", cli.buds);
+    spawn_device_name_sync(
+        cli.auth_server.clone(),
+        cli.adapter.clone(),
+        cli.bt_address.clone(),
+    );
 
     // Register SDP record
     sdp::register_sdp_record().await?;
@@ -503,19 +508,71 @@ async fn run_auth(cli: &Cli) -> Result<()> {
     let bundle = oauth.enroll_certificate(&registration).await?;
     oauth.credentials(&bundle).save()?;
 
-    println!("Account key: {}", hex::encode(bundle.account_key));
-    println!(
-        "Enrolled device: {} ({})",
-        bundle.this_device.bt_address, bundle.this_device.device_name
-    );
-    println!("User fingerprint: {}", bundle.user_fingerprint);
-    println!("Certificate revision: {}", bundle.revision);
-    println!("Peer devices: {}", bundle.devices.len());
-    println!(
-        "Credentials saved to {}",
-        auth::credentials_path().display()
-    );
+    if cli.auth_login || cli.auth_refresh {
+        println!("Account key: {}", hex::encode(bundle.account_key));
+        println!(
+            "Enrolled device: {} ({})",
+            bundle.this_device.bt_address, bundle.this_device.device_name
+        );
+        println!("User fingerprint: {}", bundle.user_fingerprint);
+        println!("Certificate revision: {}", bundle.revision);
+        println!("Peer devices: {}", bundle.devices.len());
+        println!(
+            "Credentials saved to {}",
+            auth::credentials_path().display()
+        );
+    } else {
+        info!(
+            device_name = %bundle.this_device.device_name,
+            revision = bundle.revision,
+            "Synced local device name with Samsung Continuity certificate"
+        );
+    }
     Ok(())
+}
+
+/// Checks in the background whether the enrolled Samsung certificate's
+/// `device_name` differs from `auth::local_device_name()`, and refreshes the
+/// certificate automatically when it does.
+fn spawn_device_name_sync(
+    auth_server: String,
+    adapter: String,
+    bt_address: Option<String>,
+) {
+    let Ok(Some(stored)) = auth::Credentials::load() else {
+        return;
+    };
+    if stored.refresh_token.is_empty() {
+        return;
+    }
+    let desired = auth::local_device_name();
+    if stored.device_name == desired {
+        return;
+    }
+    tokio::spawn(async move {
+        info!(
+            current = %stored.device_name,
+            desired = %desired,
+            "Device name changed; refreshing Samsung Continuity certificate in background"
+        );
+        let refresh_cli = Cli {
+            command: None,
+            phone: String::new(),
+            buds: String::new(),
+            adapter,
+            debug: false,
+            dry_run: false,
+            monitor_only: false,
+            account_fingerprint: None,
+            auth_login: false,
+            auth_refresh: false,
+            auth_server,
+            bt_address,
+        };
+        if let Err(error) = run_auth(&refresh_cli).await {
+            warn!("Could not auto-sync device name with Samsung Cloud: {error:#}");
+        }
+    });
 }
 
 async fn read_adapter_address(adapter: &str) -> Option<String> {
