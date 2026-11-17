@@ -120,9 +120,12 @@ pub fn parse_mcf_manufacturer_data(
         return None;
     }
 
-    let device_type = DeviceType::from((data[3] & 0xF0) >> 4);
+    let mut device_type = DeviceType::from((data[3] & 0xF0) >> 4);
+    if matches!(device_type, DeviceType::Unknown(0)) && data.len() > 4 {
+        device_type = DeviceType::from(data[4] & 0x0F);
+    }
 
-    let context = if data.len() >= 14 {
+    let raw_context = if data.len() >= 14 {
         let coc = u16::from_be_bytes([data[4], data[5]]);
         let device_state = data[6];
         let notification_state = data[7];
@@ -145,8 +148,8 @@ pub fn parse_mcf_manufacturer_data(
         None
     };
 
-    // Audio state from byte 9 (NS byte)
-    let audio_state = if data.len() > 9 {
+    // Unobfuscated fallback audio state from byte 9 (NS byte)
+    let raw_audio_state = if data.len() > 9 {
         match data[9] & 0xF8 {
             0x08 => AudioState::Idle,
             0x48 => AudioState::Streaming,
@@ -156,30 +159,41 @@ pub fn parse_mcf_manufacturer_data(
         AudioState::Disconnected
     };
 
+    let (coc_psm, ltv_context, ltv_audio_state) = match parse_type1_ltv(data, keys) {
+        Some((psm, ctx, audio)) => (Some(psm), ctx, audio),
+        None => (None, None, None),
+    };
+
     Some(ParsedMcfAdv {
         header,
         device_type,
-        context,
-        audio_state,
-        coc_psm: parse_coc_psm(data, keys),
+        context: ltv_context.or(raw_context),
+        audio_state: ltv_audio_state.unwrap_or(raw_audio_state),
+        coc_psm,
     })
 }
 
-/// Read the CoC PSM from the type 1 LTV record of an account-bound payload.
+/// Read the CoC PSM, DeviceContext, and AudioState from the type 1 LTV record
+/// of an account-bound payload.
 ///
 /// The LTV block is XOR-obfuscated with the account's SHA-256 table, so the
 /// payload is deobfuscated on a copy before the records are walked.
-fn parse_coc_psm(data: &[u8], keys: &BleKeyDerivation) -> Option<u16> {
-    debug!("parse_coc_psm: keys.is_configured()={}, data.len()={}, LTV_START={}", keys.is_configured(), data.len(), LTV_START);
+fn parse_type1_ltv(
+    data: &[u8],
+    keys: &BleKeyDerivation,
+) -> Option<(u16, Option<DeviceContext>, Option<AudioState>)> {
+    debug!(
+        "parse_type1_ltv: keys.is_configured()={}, data.len()={}, LTV_START={}",
+        keys.is_configured(),
+        data.len(),
+        LTV_START
+    );
     if !keys.is_configured() || data.len() <= LTV_START {
-        debug!("parse_coc_psm: early return - keys not configured or data too short");
         return None;
     }
 
     let mut clear = data.to_vec();
-    debug!("parse_coc_psm: before deobfuscate, data[16..20]={:02x?}", &clear[16..20.min(clear.len())]);
     keys.deobfuscate(&mut clear, &[]);
-    debug!("parse_coc_psm: after deobfuscate, data[16..20]={:02x?}", &clear[16..20.min(clear.len())]);
 
     let mut index = LTV_START;
     while index < clear.len() {
@@ -199,10 +213,36 @@ fn parse_coc_psm(data: &[u8], keys: &BleKeyDerivation) -> Option<u16> {
             if length < 2 {
                 return None;
             }
-            return Some(u16::from_be_bytes([
-                clear[body_start],
-                clear[body_start + 1],
-            ]));
+            let coc = u16::from_be_bytes([clear[body_start], clear[body_start + 1]]);
+            if length >= 5 {
+                let device_state = clear[body_start + 2];
+                let notification_state = clear[body_start + 3];
+                let features = clear[body_start + 4];
+                let audio_playback = if length >= 6 {
+                    Some(u16::from(clear[body_start + 5]))
+                } else {
+                    None
+                };
+                let ctx = DeviceContext {
+                    coc,
+                    device_state,
+                    notification_state,
+                    features,
+                    audio_playback,
+                };
+                // Active streaming (0x48 / bit 6).
+                let audio_state = if (notification_state & 0xF8) == NS_AUDIO_STREAMING
+                    || (notification_state & 0x40) != 0
+                {
+                    AudioState::Streaming
+                } else if (notification_state & 0xF8) == NS_AUDIO_IDLE || notification_state != 0 {
+                    AudioState::Idle
+                } else {
+                    AudioState::Disconnected
+                };
+                return Some((coc, Some(ctx), Some(audio_state)));
+            }
+            return Some((coc, None, None));
         }
 
         index = body_end;
@@ -230,60 +270,131 @@ pub async fn start_ble_scan(
         SAMSUNG_COMPANY_ID
     );
 
-    let mut stream = adapter.discover_devices_with_changes().await?;
+    let filter = bluer::DiscoveryFilter {
+        duplicate_data: true,
+        ..Default::default()
+    };
+    if let Err(e) = adapter.set_discovery_filter(filter.clone()).await {
+        debug!("Could not set BLE discovery filter: {e}");
+    }
+
+    let initial_stream = adapter.discover_devices_with_changes().await?;
 
     tokio::spawn(async move {
-        while let Some(event) = stream.next().await {
-            let bluer::AdapterEvent::DeviceAdded(addr) = event else {
-                continue;
-            };
-            let Ok(device) = adapter.device(addr) else {
-                continue;
-            };
-            debug!("Reading manufacturer data for device {}", addr);
-            let Ok(Some(mfg_data)) = device.manufacturer_data().await else {
-                continue;
-            };
-            debug!("Got {} manufacturer data entries for {}", mfg_data.len(), addr);
-            let Some(samsung_data) = mfg_data.get(&SAMSUNG_COMPANY_ID) else {
-                continue;
-            };
-            debug!("Samsung data from {} ({} bytes): {}", addr, samsung_data.len(), hex::encode(samsung_data));
-            let Some(parsed) = parse_mcf_manufacturer_data(samsung_data, &keys) else {
-            debug_log_adv(&addr.to_string(), samsung_data);
-                continue;
+        let mut stream_opt = Some(initial_stream);
+        let mut backoff = Duration::from_secs(2);
+        let mut last_seen: std::collections::HashMap<
+            (bluer::Address, usize),
+            (Vec<u8>, tokio::time::Instant),
+        > = std::collections::HashMap::new();
+
+        loop {
+            let mut stream = match stream_opt.take() {
+                Some(s) => s,
+                None => {
+                    tokio::time::sleep(backoff).await;
+                    let _ = adapter.set_discovery_filter(filter.clone()).await;
+                    match adapter.discover_devices_with_changes().await {
+                        Ok(s) => {
+                            debug!("Re-established BLE discovery stream");
+                            backoff = Duration::from_secs(2);
+                            s
+                        }
+                        Err(e) => {
+                            debug!("BLE discovery restart delayed ({e}); backing off");
+                            backoff = (backoff * 2).min(Duration::from_secs(15));
+                            continue;
+                        }
+                    }
+                }
             };
 
-            let address_type = device
-                .address_type()
-                .await
-                .unwrap_or(AddressType::LePublic);
-            let rssi = device.rssi().await.unwrap_or(Some(-100)).unwrap_or(-100);
-            let adv_event = BleAdvEvent {
-                address: addr.to_string(),
-                address_type,
-                rssi,
-                header: parsed.header,
-                device_type: parsed.device_type,
-                context: parsed.context,
-                audio_state: parsed.audio_state,
-                coc_psm: parsed.coc_psm,
-                raw_data: samsung_data.clone(),
-            };
+            while let Some(event) = stream.next().await {
+                let bluer::AdapterEvent::DeviceAdded(addr) = event else {
+                    continue;
+                };
+                let Ok(device) = adapter.device(addr) else {
+                    continue;
+                };
+                let Ok(Some(mfg_data)) = device.manufacturer_data().await else {
+                    continue;
+                };
+                let Some(samsung_data) = mfg_data.get(&SAMSUNG_COMPANY_ID) else {
+                    continue;
+                };
 
-            debug!(
-                "MCF adv from {} type={:?} audio={:?} psm={:?} rssi={}",
-                adv_event.address,
-                adv_event.device_type,
-                adv_event.audio_state,
-                adv_event.coc_psm,
-                adv_event.rssi
-            );
+                let now = tokio::time::Instant::now();
+                let key = (addr, samsung_data.len());
+                let payload_changed = match last_seen.get(&key) {
+                    Some((prev_bytes, prev_time)) => {
+                        if prev_bytes == samsung_data
+                            && now.duration_since(*prev_time) < Duration::from_secs(15)
+                        {
+                            continue;
+                        }
+                        prev_bytes != samsung_data
+                    }
+                    None => true,
+                };
+                last_seen.insert(key, (samsung_data.clone(), now));
 
-            if tx.send(adv_event).await.is_err() {
-                warn!("BLE scan event receiver dropped, stopping scan loop");
-                break;
+                debug!(
+                    "Samsung data from {} ({} bytes): {}",
+                    addr,
+                    samsung_data.len(),
+                    hex::encode(samsung_data)
+                );
+                let Some(parsed) = parse_mcf_manufacturer_data(samsung_data, &keys) else {
+                    debug_log_adv(&addr.to_string(), samsung_data);
+                    continue;
+                };
+
+                let address_type = device
+                    .address_type()
+                    .await
+                    .unwrap_or(AddressType::LePublic);
+                let rssi = device.rssi().await.unwrap_or(Some(-100)).unwrap_or(-100);
+                let adv_event = BleAdvEvent {
+                    address: addr.to_string(),
+                    address_type,
+                    rssi,
+                    header: parsed.header,
+                    device_type: parsed.device_type,
+                    context: parsed.context,
+                    audio_state: parsed.audio_state,
+                    coc_psm: parsed.coc_psm,
+                    raw_data: samsung_data.clone(),
+                };
+
+                if payload_changed && adv_event.coc_psm.is_some() {
+                    info!(
+                        "MCF adv from {} type={:?} audio={:?} psm={:?} ctx={:?} rssi={}",
+                        adv_event.address,
+                        adv_event.device_type,
+                        adv_event.audio_state,
+                        adv_event.coc_psm,
+                        adv_event.context,
+                        adv_event.rssi
+                    );
+                } else {
+                    debug!(
+                        "MCF adv from {} type={:?} audio={:?} psm={:?} ctx={:?} rssi={}",
+                        adv_event.address,
+                        adv_event.device_type,
+                        adv_event.audio_state,
+                        adv_event.coc_psm,
+                        adv_event.context,
+                        adv_event.rssi
+                    );
+                }
+
+                if tx.send(adv_event).await.is_err() {
+                    warn!("BLE scan event receiver dropped, stopping scan loop");
+                    return;
+                }
             }
+
+            debug!("BLE discovery stream ended (BlueZ paused discovery); scheduling restart");
         }
     });
 
@@ -600,14 +711,14 @@ pub fn build_mcf_advertisement_with_account(
     }
 
     // Debug: log the exact advertisement bytes
-    tracing::info!("BLE advertisement: {} bytes", data.len());
-    tracing::info!("  Hex: {}", hex::encode(&data));
-    tracing::info!("  Checksum (byte 2): 0x{:02x}", data[2]);
-    tracing::info!("  BT address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", bt_address[0], bt_address[1], bt_address[2], bt_address[3], bt_address[4], bt_address[5]);
+    tracing::debug!("BLE advertisement: {} bytes", data.len());
+    tracing::debug!("  Hex: {}", hex::encode(&data));
+    tracing::debug!("  Checksum (byte 2): 0x{:02x}", data[2]);
+    tracing::debug!("  BT address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", bt_address[0], bt_address[1], bt_address[2], bt_address[3], bt_address[4], bt_address[5]);
     if data.len() >= 22 {
-        tracing::info!("  Type 1 record (bytes 16..22): {}", hex::encode(&data[16..22]));
+        tracing::debug!("  Type 1 record (bytes 16..22): {}", hex::encode(&data[16..22]));
     }
-    tracing::info!("  Fingerprint checksum matches: {}", key_derivation.checksum_matches(data[2]));
+    tracing::debug!("  Fingerprint checksum matches: {}", key_derivation.checksum_matches(data[2]));
 
     data
 }
@@ -798,6 +909,24 @@ mod tests {
             .expect("advertisement parses");
 
         assert_eq!(parsed.coc_psm, Some(COC));
+        assert_eq!(parsed.audio_state, AudioState::Idle);
+        assert_eq!(parsed.device_type, DeviceType::Phone);
+
+        let streaming_adv = build_mcf_advertisement_with_account(
+            DEVICE_KIND_PHONE,
+            AudioState::Streaming,
+            &keys(),
+            BT_ADDRESS,
+            COC,
+            None,
+        );
+        let parsed_streaming = parse_mcf_manufacturer_data(&streaming_adv, &scan_keys)
+            .expect("streaming advertisement parses");
+        assert_eq!(parsed_streaming.audio_state, AudioState::Streaming);
+        assert_eq!(
+            parsed_streaming.context.map(|c| c.notification_state),
+            Some(NS_AUDIO_STREAMING)
+        );
     }
 
     #[test]
