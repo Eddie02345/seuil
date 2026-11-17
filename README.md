@@ -226,6 +226,7 @@ Configuration lives in `~/.config/seuil/config.toml`:
 phone_mac = "AA:BB:CC:DD:EE:FF"
 buds_mac = "11:22:33:44:55:66"
 # adapter = "hci0"
+# device_name = "My PC"  # override the hostname shown on the phone
 # discover = true   # fill missing MACs from the account device list / BlueZ
 ```
 

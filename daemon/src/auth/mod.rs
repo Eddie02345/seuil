@@ -38,13 +38,52 @@ const DEFAULT_AUTH_SERVER: &str = "eu-auth2.samsungosp.com";
 /// pasted back unless `MCFDS_OAUTH_REDIRECT` names a loopback listener.
 const DEFAULT_REDIRECT: &str =
     "ms-app://s-1-15-2-4027708247-2189610-1983755848-2937435718-1578786913-2158692839-1974417358";
-const DEVICE_NAME: &str = "seuil";
+const FALLBACK_DEVICE_NAME: &str = "seuil";
 /// Continuity is a Windows PC service; these identity fields match the working
 /// reference client so the cloud accepts this installation as a PC.
 const DEVICE_MODEL: &str = "PC";
 const DEVICE_OS_VERSION: &str = "11";
 const COUNTRY_CODE: &str = "fr";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// Resolves the machine's display name (`device_name` from `config.toml`,
+/// `PRETTY_HOSTNAME` from `/etc/machine-info`, or the system hostname from
+/// `/etc/hostname`), falling back to `"seuil"`.
+pub fn local_device_name() -> String {
+    if let Some(configured) = crate::config::load()
+        .device_name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+    {
+        return configured;
+    }
+    if let Ok(info) = std::fs::read_to_string("/etc/machine-info")
+        && let Some(pretty) = parse_pretty_hostname(&info)
+    {
+        return pretty;
+    }
+    for path in ["/etc/hostname", "/proc/sys/kernel/hostname"] {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    FALLBACK_DEVICE_NAME.to_string()
+}
+
+pub(crate) fn parse_pretty_hostname(machine_info: &str) -> Option<String> {
+    for line in machine_info.lines() {
+        if let Some(rest) = line.trim().strip_prefix("PRETTY_HOSTNAME=") {
+            let unquoted = rest.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+            if !unquoted.is_empty() {
+                return Some(unquoted.to_string());
+            }
+        }
+    }
+    None
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -247,6 +286,7 @@ impl SamsungOAuth {
     }
 
     pub fn build_svc_param(&self, entry_point: &EntryPoint) -> Result<String> {
+        let device_name = local_device_name();
         let payload = json!({
             "clientId": self.master_client_id,
             "code_challenge": crypto::base64_url_no_pad(&crypto::sha256(self.code_verifier.as_bytes())),
@@ -255,7 +295,7 @@ impl SamsungOAuth {
             "countryCode": COUNTRY_CODE,
             "deviceInfo": "Google|com.android.chrome",
             "deviceModelID": DEVICE_MODEL,
-            "deviceName": DEVICE_NAME,
+            "deviceName": device_name,
             "deviceOSVersion": DEVICE_OS_VERSION,
             "devicePhysicalAddressText": format!("MAC:{}", self.device_id),
             "deviceType": "APP",
@@ -378,6 +418,7 @@ impl SamsungOAuth {
 
     pub async fn register_device(&self) -> Result<DeviceRegistration> {
         let headers = self.identity_headers()?;
+        let device_name = local_device_name();
         let body = json!({
             "app": {
                 "version": APP_VERSION,
@@ -391,7 +432,7 @@ impl SamsungOAuth {
                 "countryCode": "FRA",
                 "modelName": DEVICE_MODEL,
                 "modelCode": DEVICE_MODEL,
-                "alias": DEVICE_NAME,
+                "alias": device_name,
                 "osUserId": "0"
             }
         });
@@ -461,12 +502,21 @@ impl SamsungOAuth {
         )];
         let url = "https://play.samsungcloud.com/certificate/v2/certificates?kcid=KC01";
 
+        let device_name = local_device_name();
         match self.get_json_with_headers(url, &headers).await {
             Ok(value) => {
                 if let Some(bundle) = parse_bundle(&value, &local)? {
-                    return Ok(bundle);
+                    if bundle.this_device.device_name == device_name {
+                        return Ok(bundle);
+                    }
+                    info!(
+                        current = %bundle.this_device.device_name,
+                        desired = %device_name,
+                        "Samsung certificate device name differs from local hostname; re-enrolling"
+                    );
+                } else {
+                    debug!("Existing Samsung certificate does not identify this device; enrolling");
                 }
-                debug!("Existing Samsung certificate does not identify this device; enrolling");
             }
             Err(AuthError::Http {
                 code: Some(40002001),
@@ -479,7 +529,7 @@ impl SamsungOAuth {
         let body = json!({
             "csr": csr,
             "device": {
-                "deviceName": DEVICE_NAME,
+                "deviceName": device_name,
                 "deviceModel": DEVICE_MODEL,
                 "modelCode": DEVICE_MODEL,
                 "deviceType": "pc",
@@ -514,6 +564,7 @@ impl SamsungOAuth {
             account_key: hex::encode(bundle.account_key),
             user_fingerprint: bundle.user_fingerprint.clone(),
             revision: bundle.revision,
+            device_name: local_device_name(),
             devices: bundle.devices.clone(),
         }
     }
@@ -1296,5 +1347,15 @@ mod tests {
         assert_eq!(callback.auth_server_url, "https://eu-auth2.samsungosp.com");
         assert_eq!(callback.login_id, "user@example.com");
         assert_eq!(callback.state, oauth.state);
+    }
+
+    #[test]
+    fn pretty_hostname_is_extracted_and_local_device_name_is_non_empty() {
+        assert_eq!(
+            parse_pretty_hostname("CHASSIS=laptop\nPRETTY_HOSTNAME=\"Fedora Workstation\"\n"),
+            Some("Fedora Workstation".to_string())
+        );
+        assert_eq!(parse_pretty_hostname("PRETTY_HOSTNAME=\"\"\n"), None);
+        assert!(!local_device_name().trim().is_empty());
     }
 }

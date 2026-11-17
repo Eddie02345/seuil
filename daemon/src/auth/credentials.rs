@@ -46,6 +46,8 @@ pub struct Credentials {
     pub account_key: String,
     pub user_fingerprint: String,
     pub revision: u32,
+    #[serde(default)]
+    pub device_name: String,
     pub devices: Vec<DeviceInfo>,
 }
 
