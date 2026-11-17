@@ -97,15 +97,18 @@ seuil setup
 
 ### Debian / Ubuntu
 
-Run these commands on recent Debian or Ubuntu (22.04+).
+Run these commands on recent Debian or Ubuntu (22.04+). Assuming a `seuil` version greater than v1.0.1 (exclusive). Ignore everything related the systemd unit installation for v1.0.1 and below.
 
 #### Prebuilt binary (no Rust toolchain)
 
 ```sh
 sudo apt update && sudo apt install -y bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.config/systemd/user
 curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
+tar -xzf /tmp/seuil.tar.gz -C /tmp seuil seuil.service
+install -m 755 /tmp/seuil ~/.local/bin/seuil
+install -m 644 /tmp/seuil.service ~/.config/systemd/user/seuil.service
+systemctl --user daemon-reload
 ~/.local/bin/seuil setup
 ```
 
@@ -132,9 +135,12 @@ Installing Rust with `rustup` is recommended on Debian/Ubuntu: the distro
 
 ```sh
 sudo dnf install -y bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.config/systemd/user
 curl -L -o /tmp/seuil.tar.gz https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-v1.0.1-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf /tmp/seuil.tar.gz -C ~/.local/bin
+tar -xzf /tmp/seuil.tar.gz -C /tmp seuil seuil.service
+install -m 755 /tmp/seuil ~/.local/bin/seuil
+install -m 644 /tmp/seuil.service ~/.config/systemd/user/seuil.service
+systemctl --user daemon-reload
 ~/.local/bin/seuil setup
 ```
 
@@ -157,9 +163,8 @@ The wizard (`seuil setup`, `seuil setup --reauth`):
    waits for the browser callback or a URL pasted into the terminal;
 3. lists paired BlueZ devices with a likely role (phone or Buds) and asks for
    two list numbers. Press Enter to accept the default shown in brackets;
-4. writes `~/.config/seuil/config.toml`, installs
-   `~/.config/systemd/user/seuil.service`, reloads systemd, and enables and
-   starts the service.
+4. writes `~/.config/seuil/config.toml` and tells the user that the systemd
+   service can now be enabled.
 
 Setup accepts `--bt-address`, `--adapter`, and `--auth-server` before or after
 the subcommand. `--debug` and `RUST_LOG` also apply to setup.
