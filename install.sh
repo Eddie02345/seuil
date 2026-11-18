@@ -63,8 +63,8 @@ echo "Installing to ${BIN}"
 install -Dm755 "${ROOT}/daemon/target/release/${NAME}" "${BIN}"
 
 echo "Creating ${SERVICE}"
-mkdir -p ${SERV_DIR}
-cat > ${SERVICE} << EOF
+mkdir -p "${SERV_DIR}"
+cat > "${SERVICE}"" << EOF
 [Unit]
 Description=Seuil Samsung Continuity daemon (Galaxy Buds Auto Switch)
 After=pipewire.service bluetooth.target
