@@ -1,7 +1,8 @@
 //! SDP record registration for BlueZ
 
-use anyhow::Result;
-use tracing::{debug, info};
+use anyhow::{Context, Result};
+use std::io::Write;
+use tracing::{debug, info, warn};
 
 use crate::protocol::CONTINUITY_MSG_SPP_UUID;
 
@@ -54,17 +55,38 @@ pub async fn register_sdp_record() -> Result<()> {
 
     debug!("SDP record XML:\n{}", sdp_xml);
 
-    // Write the SDP record to a temporary file and register it
-    let tmp_path = "/tmp/seuil-sdp.xml";
-    tokio::fs::write(tmp_path, &sdp_xml).await?;
+    // [FR-013] Write to a unique owner-only temp file instead of a fixed /tmp
+    // path another process could pre-create or symlink. Nothing consumes the
+    // file yet, so it is removed once the advisory command is logged.
+    let tmp_path = std::env::temp_dir().join(format!(
+        "seuil-sdp-{}-{}.xml",
+        std::process::id(),
+        hex::encode(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or_default()
+            .to_le_bytes())
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&tmp_path)
+        .with_context(|| format!("create {}", tmp_path.display()))?;
+    file.write_all(sdp_xml.as_bytes())
+        .with_context(|| format!("write {}", tmp_path.display()))?;
+    drop(file);
 
-    // Use sdptool to register the record
-    // TODO: This requires root and BlueZ to be running
-    info!("SDP record written to {}", tmp_path);
+    info!("SDP record written to {}", tmp_path.display());
     info!(
         "Register with: sdptool add --channel=7 {}",
         CONTINUITY_MSG_SPP_UUID
     );
+    let _ = std::fs::remove_file(&tmp_path);
 
     Ok(())
 }
@@ -87,6 +109,27 @@ pub async fn query_remote_sdp(address: &str) -> Result<Vec<SdpRecord>> {
                 anyhow::Error::new(error).context(format!("run sdptool browse {address}"))
             }
         })?;
+
+    // [FR-013] Distinguish a failing sdptool invocation from a missing tool and
+    // from an absent service record.
+    if !output.status.success() {
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "terminated by signal".to_string(), |code| format!("exit code {code}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            address,
+            %status,
+            stderr = %stderr.trim(),
+            "sdptool browse failed; the local SDP query usually needs bluetoothd's \
+             compatibility flag"
+        );
+        anyhow::bail!(
+            "`sdptool browse {address}` failed with {status}; this is a failed SDP query, \
+             not a missing service record"
+        );
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut records = Vec::new();

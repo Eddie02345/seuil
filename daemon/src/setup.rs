@@ -4,8 +4,10 @@
 //! BlueZ paired devices for the user to pick from, writes the config, and
 //! installs and starts the systemd user unit.
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -13,10 +15,51 @@ use clap::Parser;
 use tracing::info;
 
 use crate::auth::Credentials;
+use crate::doctor::command_available;
 use crate::{config, Cli};
 
 /// Systemd unit name, also the service name.
 const SERVICE: &str = "seuil.service";
+
+/// Path systemd reads the BlueZ drop-in from.
+pub const BLUEZ_DROPIN_PATH: &str = "/etc/systemd/system/bluetooth.service.d/override.conf";
+
+/// Standard bluetoothd locations, tried in order when the drop-in is built.
+/// SteamOS and Arch ship `/usr/lib/bluetooth/bluetoothd`; the Debian family and
+/// Fedora ship `/usr/libexec/bluetooth/bluetoothd`. [FR-005]
+const BLUEZD_CANDIDATES: [&str; 2] = [
+    "/usr/lib/bluetooth/bluetoothd",
+    "/usr/libexec/bluetooth/bluetoothd",
+];
+
+/// Resolves the bluetoothd executable this system ships, so the printed drop-in
+/// never carries an `ExecStart` path from another distribution.
+fn resolve_bluetoothd() -> Option<&'static str> {
+    BLUEZD_CANDIDATES
+        .iter()
+        .copied()
+        .find(|candidate| executable_file(Path::new(candidate)))
+}
+
+/// Builds the optional drop-in that starts the resolved bluetoothd with the
+/// experimental interfaces. The current code path does not need it, so it is
+/// printed and only installed behind `--install-bluez-dropin`.
+fn bluez_dropin(bluetoothd: &str) -> String {
+    format!(
+        "# The ExecStart path below was detected on this system at setup time; edit it\n\
+         # if your distribution installs bluetoothd elsewhere.\n\
+         [Service]\n\
+         ExecStart=\n\
+         ExecStart={bluetoothd} -E\n"
+    )
+}
+
+/// Reports whether `path` is a regular file with an execute bit set.
+fn executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
 
 /// Which role a paired device most likely plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +104,17 @@ fn classify(class: Option<u32>, name: &str) -> Role {
 }
 
 /// Runs the setup wizard.
-pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
+pub async fn run(cli: &Cli, reauth: bool, install_bluez_dropin: bool) -> Result<()> {
     println!("Seuil setup");
+    if !command_available("bluetoothctl") {
+        println!(
+            "warning: `bluetoothctl` is not installed; pairing the phone and the Buds will fail"
+        );
+    }
+    println!(
+        "On a Steam Deck, run setup in Desktop Mode: sign-in opens a browser and the daemon \
+         needs your user session."
+    );
 
     ensure_enrolled(cli, reauth).await?;
 
@@ -107,20 +159,21 @@ pub async fn run(cli: &Cli, reauth: bool) -> Result<()> {
     let buds = devices[buds_index].address.clone();
 
     let dir = config::config_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    ensure_private_dir(&dir)?;
     let config_path = dir.join("config.toml");
     let text = format!(
         "# Seuil configuration\nphone_mac = \"{phone}\"\nbuds_mac = \"{buds}\"\n# adapter = \"{}\"\n# discover = true\n",
         cli.adapter
     );
-    std::fs::write(&config_path, text)
-        .with_context(|| format!("write {}", config_path.display()))?;
+    write_atomic(&config_path, text.as_bytes(), 0o600)?;
     println!("\nWrote {}", config_path.display());
 
+    report_optional_tools();
     install_service()?;
     println!("Installed and started {SERVICE}");
+    print_bluez_dropin(install_bluez_dropin)?;
     println!("Check the connection with: journalctl --user -u {SERVICE} -f");
+    println!("Verify the install with: seuil doctor");
     Ok(())
 }
 
@@ -220,10 +273,10 @@ async fn prompt_index(label: &str, suggested: Option<usize>, len: usize) -> Resu
 fn install_service() -> Result<()> {
     let unit_path = unit_path()?;
     if let Some(parent) = unit_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::write(&unit_path, unit_text())
-        .with_context(|| format!("write {}", unit_path.display()))?;
+    write_atomic(&unit_path, unit_text().as_bytes(), 0o644)?;
 
     let bin = home_dir()?.join(".local/bin/seuil");
     if !bin.exists() {
@@ -234,7 +287,10 @@ fn install_service() -> Result<()> {
     }
 
     run_systemctl(&["--user", "daemon-reload"])?;
-    run_systemctl(&["--user", "enable", "--now", SERVICE])?;
+    run_systemctl(&["--user", "enable", SERVICE])?;
+    // `enable --now` leaves an already-running unit untouched, so a re-run of
+    // setup would keep the daemon on the previous phone/Buds addresses.
+    run_systemctl(&["--user", "restart", SERVICE])?;
     Ok(())
 }
 
@@ -247,12 +303,16 @@ pub fn unit_path() -> Result<PathBuf> {
 }
 
 /// Contents of the user unit.
+///
+/// [FR-003] User-scope ordering only: a user unit cannot depend on system units
+/// such as `bluetooth.target`, and `PartOf=graphical-session.target` would stop
+/// the daemon on a Gaming Mode to Desktop Mode switch.
+/// `WantedBy=default.target` starts it on a pure Gaming Mode boot.
 pub fn unit_text() -> String {
     "[Unit]\n\
          Description=Seuil Samsung Continuity daemon (Galaxy Buds Auto Switch)\n\
-         After=pipewire.service bluetooth.target\n\
+         After=pipewire.service\n\
          Wants=pipewire.service\n\
-         PartOf=graphical-session.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -264,6 +324,149 @@ pub fn unit_text() -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n".to_string()
+}
+
+/// Prints the optional BlueZ drop-in and installs it only when asked. [FR-005]
+fn print_bluez_dropin(install: bool) -> Result<()> {
+    println!(
+        "\nOptional BlueZ experimental interfaces (advisory: the current code path does not \
+         need them)"
+    );
+    let Some(bluetoothd) = resolve_bluetoothd() else {
+        let candidates = BLUEZD_CANDIDATES.join(", ");
+        println!(
+            "No bluetoothd executable was found at {candidates}. A drop-in whose ExecStart \
+             names a nonexistent binary would stop bluetoothd, so none was written; locate \
+             your distribution's bluetoothd before installing the drop-in."
+        );
+        if install {
+            anyhow::bail!(
+                "--install-bluez-dropin was passed but no bluetoothd executable was found at \
+                 {candidates}; install the drop-in manually with the correct ExecStart path"
+            );
+        }
+        return Ok(());
+    };
+    let dropin = bluez_dropin(bluetoothd);
+    let path = config::config_dir().join("bluetooth-override.conf");
+    write_atomic(&path, dropin.as_bytes(), 0o644)
+        .with_context(|| format!("write {}", path.display()))?;
+
+    for line in dropin.lines() {
+        println!("  {line}");
+    }
+    println!("\nInstall the drop-in with:");
+    println!("  sudo install -Dm644 {} {BLUEZ_DROPIN_PATH}", path.display());
+    println!("  sudo systemctl daemon-reload");
+    println!("  sudo systemctl restart bluetooth");
+    println!(
+        "\nSteamOS 3.6 and newer migrate /etc by allowlist only. Add an entry such as\n  \
+         systemd/system/bluetooth.service.d/override.conf\nto /etc/atomic-update.conf.d/ (for \
+         example /etc/atomic-update.conf.d/seuil-bluez.conf), or the override is dropped on the \
+         next OS update."
+    );
+
+    if !install {
+        println!(
+            "Nothing was written under /etc. Re-run `seuil setup --install-bluez-dropin` to apply it."
+        );
+        return Ok(());
+    }
+
+    let mut command = Command::new("sudo");
+    command.args(["install", "-Dm644"]).arg(&path).arg(BLUEZ_DROPIN_PATH);
+    let status = command.status().context("run sudo install")?;
+    if !status.success() {
+        anyhow::bail!(
+            "`sudo install -Dm644 {} {BLUEZ_DROPIN_PATH}` failed with {status}; nothing was \
+             written under /etc",
+            path.display()
+        );
+    }
+
+    for args in [
+        &["systemctl", "daemon-reload"][..],
+        &["systemctl", "restart", "bluetooth"][..],
+    ] {
+        let status = Command::new("sudo")
+            .args(args)
+            .status()
+            .with_context(|| format!("run sudo {}", args.join(" ")))?;
+        if !status.success() {
+            anyhow::bail!(
+                "`sudo {}` failed with {status}; the drop-in was written but not activated; run \
+                 `seuil doctor` to check",
+                args.join(" ")
+            );
+        }
+    }
+    println!("Installed {BLUEZ_DROPIN_PATH} and restarted bluetooth");
+    Ok(())
+}
+
+/// Warns about optional tools that only degrade a feature. [FR-004]
+fn report_optional_tools() {
+    for (tool, feature) in [
+        ("sdptool", "the phone SDP check is skipped (normal on SteamOS)"),
+        ("pactl", "PipeWire stream activity detection is degraded"),
+        ("playerctl", "MPRIS playback detection is degraded"),
+    ] {
+        if !command_available(tool) {
+            println!("warning: `{tool}` is not installed; {feature}");
+        }
+    }
+}
+
+/// Creates `dir` if needed and tightens it to owner-only. [FR-022]
+fn ensure_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("set permissions on {}", dir.display()))?;
+    Ok(())
+}
+
+/// Writes `contents` to `path` through a same-directory temporary file and a
+/// rename, so a crash leaves the previous content intact. [FR-022]
+fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let temp = parent.join(format!(".{name}.tmp.{}", std::process::id()));
+
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .open(&temp)
+            .with_context(|| format!("create {}", temp.display()))?;
+        // Re-apply the mode: a stale temporary file from a crashed run may
+        // already exist with wider permissions.
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("set permissions on {}", temp.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("write {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temp.display()))?;
+        std::fs::rename(&temp, path)
+            .with_context(|| format!("rename {} to {}", temp.display(), path.display()))?;
+        // Persist the rename itself. A failure here only weakens crash
+        // durability, so it does not fail setup.
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 fn run_systemctl(args: &[&str]) -> Result<()> {
@@ -308,6 +511,8 @@ mod tests {
     fn unit_starts_the_rebranded_binary() {
         let unit = unit_text();
         assert!(unit.contains("ExecStart=%h/.local/bin/seuil"));
-        assert!(unit.contains("After=pipewire.service bluetooth.target"));
+        assert!(unit.contains("After=pipewire.service"));
+        assert!(!unit.contains("bluetooth.target"));
+        assert!(!unit.contains("graphical-session.target"));
     }
 }

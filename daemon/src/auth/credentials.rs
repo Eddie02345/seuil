@@ -26,8 +26,11 @@ const ENVELOPE_VERSION: u8 = 1;
 // stores stay decryptable after migration.
 const AAD: &[u8] = b"linux-mcfds-credentials-v1";
 
+/// Placeholder shown for secret fields in `Debug` output.
+const REDACTED: &str = "<redacted>";
+
 /// Persisted Samsung account session. Never log this value.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
     pub auth_server: String,
     pub userauth_token: String,
@@ -58,9 +61,37 @@ struct Envelope {
     ciphertext: String,
 }
 
+/// [FR-021] Debug output names the fields but never prints key material,
+/// tokens, the CSR, or the private key.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("auth_server", &self.auth_server)
+            .field("userauth_token", &REDACTED)
+            .field("user_id", &REDACTED)
+            .field("login_id", &REDACTED)
+            .field("device_id", &REDACTED)
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .field("access_expires", &self.access_expires)
+            .field("registration_id", &REDACTED)
+            .field("cloud_token", &REDACTED)
+            .field("cloud_expires", &self.cloud_expires)
+            .field("csr", &REDACTED)
+            .field("private_key", &REDACTED)
+            .field("bt_address", &REDACTED)
+            .field("account_key", &REDACTED)
+            .field("user_fingerprint", &REDACTED)
+            .field("revision", &self.revision)
+            .field("device_name", &self.device_name)
+            .field("devices", &self.devices.len())
+            .finish()
+    }
+}
+
 impl Credentials {
     pub fn load() -> Result<Option<Self>> {
-        Self::load_from(&config_dir())
+        Self::load_from(&config_dir()?)
     }
 
     fn load_from(dir: &Path) -> Result<Option<Self>> {
@@ -108,12 +139,12 @@ impl Credentials {
     }
 
     pub fn save(&self) -> Result<()> {
-        self.save_to(&config_dir())
+        self.save_to(&config_dir()?)
     }
 
     fn save_to(&self, dir: &Path) -> Result<()> {
         create_private_dir(dir)?;
-        let key = read_key(dir)?;
+        let key = read_key_for_save(dir)?;
         let plaintext = serde_json::to_vec(self)?;
         let nonce = random_bytes(12);
         let cipher = Aes256Gcm::new_from_slice(&key)
@@ -162,29 +193,66 @@ impl Credentials {
 }
 
 pub fn data_path() -> PathBuf {
-    config_dir().join(DATA_FILE)
+    crate::config::config_dir().join(DATA_FILE)
 }
 
-fn config_dir() -> PathBuf {
-    crate::config::config_dir()
+fn config_dir() -> Result<PathBuf> {
+    crate::config::try_config_dir().map_err(|error| AuthError::Protocol(error.to_string()))
 }
 
+/// Reads the 32-byte AES key, failing rather than regenerating when it is
+/// missing, unreadable, or the wrong length.
+///
+/// [FR-020] A regenerated key would orphan the encrypted envelope, so a missing
+/// key is a load failure that names the key file.
 fn read_key(dir: &Path) -> Result<[u8; 32]> {
     let path = dir.join(KEY_FILE);
     reject_symlink(&path)?;
-    match fs::read(&path) {
-        Ok(bytes) if bytes.len() == 32 => Ok(bytes.try_into().expect("length checked")),
-        Ok(_) => Err(AuthError::Crypto(
-            "local credentials key has an invalid length".into(),
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            create_private_dir(dir)?;
-            let key = random_bytes(32);
-            write_private(&path, &key)?;
-            Ok(key.try_into().expect("length is 32"))
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AuthError::Protocol(format!(
+                "credentials key {} is missing; restore it or rerun setup --reauth",
+                path.display()
+            )));
         }
-        Err(e) => Err(e.into()),
+        Err(error) => {
+            return Err(AuthError::Protocol(format!(
+                "credentials key {} could not be read: {error}",
+                path.display()
+            )));
+        }
+    };
+    <[u8; 32]>::try_from(bytes).map_err(|bytes| {
+        AuthError::Protocol(format!(
+            "credentials key {} has length {}; expected 32 bytes",
+            path.display(),
+            bytes.len()
+        ))
+    })
+}
+
+/// Returns the AES key for a save, creating one when the key file is missing.
+///
+/// [FR-020] `save` rewrites the entire envelope, so a keyless store cannot be
+/// read back anyway: creating a fresh key lets the doctor's `setup --reauth`
+/// remedy complete. Load time stays strict: [`read_key`] still fails on a
+/// missing key rather than orphaning an envelope it cannot decrypt.
+fn read_key_for_save(dir: &Path) -> Result<[u8; 32]> {
+    let key_path = dir.join(KEY_FILE);
+    reject_symlink(&key_path)?;
+    if key_path.exists() {
+        return read_key(dir);
     }
+    create_private_dir(dir)?;
+    let key = random_bytes(32);
+    write_private(&key_path, &key)?;
+    <[u8; 32]>::try_from(key).map_err(|key| {
+        AuthError::Crypto(format!(
+            "generated credentials key has length {}; expected 32 bytes",
+            key.len()
+        ))
+    })
 }
 
 fn reject_symlink(path: &Path) -> Result<()> {
@@ -222,7 +290,14 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("credentials");
-    let temp = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
+
+    // [FR-020] A unique temp name means a leftover temp file from a crashed
+    // save never blocks a later one, and concurrent writers cannot collide.
+    let unique = hex::encode(random_bytes(8));
+    let temp = dir.join(format!(
+        ".{file_name}.{}.{unique}.tmp",
+        std::process::id()
+    ));
 
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -231,14 +306,30 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&temp)?;
-    if let Err(e) = file.write_all(data).and_then(|_| file.sync_all()) {
-        drop(file);
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&temp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
         let _ = fs::remove_file(&temp);
-        return Err(e.into());
+        return Err(error.into());
     }
-    drop(file);
-    fs::rename(&temp, path)?;
+
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error.into());
+    }
+
+    // [FR-020] Persist the rename itself so a crash cannot lose the new file.
+    // A directory sync failure weakens durability only, so it does not fail the
+    // save.
+    #[cfg(unix)]
+    if let Ok(dir_file) = fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
     Ok(())
 }
 
@@ -324,6 +415,38 @@ mod tests {
         assert_eq!(
             Credentials::load_from(&dir)
                 .expect("load after completed save")
+                .expect("credentials present")
+                .device_id,
+            "device-new"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn save_creates_a_missing_key_over_an_existing_envelope() {
+        let dir = temp_dir();
+        Credentials {
+            device_id: "device-old".into(),
+            ..Credentials::default()
+        }
+        .save_to(&dir)
+        .expect("first save");
+        fs::remove_file(dir.join(KEY_FILE)).expect("remove key");
+
+        // The strict load path still refuses the keyless store.
+        assert!(Credentials::load_from(&dir).is_err());
+
+        // A save rewrites the envelope, so it may mint a fresh key.
+        Credentials {
+            device_id: "device-new".into(),
+            ..Credentials::default()
+        }
+        .save_to(&dir)
+        .expect("save over a keyless store");
+        assert_eq!(
+            Credentials::load_from(&dir)
+                .expect("load after key recovery")
                 .expect("credentials present")
                 .device_id,
             "device-new"

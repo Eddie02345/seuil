@@ -10,29 +10,61 @@ permissions:
 
 env:
   BINARY: seuil
+  ASSET: seuil-x86_64-unknown-linux-gnu.tar.gz
 
 jobs:
-  tarball:
-    name: Generic x86_64 tarball
+  portable:
+    name: Portable x86_64 (Debian 11, glibc 2.31)
     runs-on: ubuntu-24.04
+    # Build against the oldest supported glibc. SteamOS is newer than Debian
+    # 11, so an artifact built here loads on the Deck and on current desktops.
+    # [FR-006]
+    container: debian:11
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config \
+            libdbus-1-dev xz-utils
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
       - name: Build
-        run: cargo build --release --locked --manifest-path daemon/Cargo.toml
+        run: >-
+          cargo build --release --locked
+          --target x86_64-unknown-linux-gnu
+          --manifest-path daemon/Cargo.toml
+      - name: Verify the glibc baseline and linkage
+        run: |
+          set -euo pipefail
+          bin=daemon/target/x86_64-unknown-linux-gnu/release/seuil
+          echo "Container libc:"
+          ldd --version | head -n 1
+          "$bin" --version
+          ldd "$bin" | tee linkage.txt
+          # Basic, glibc 2.31-era libraries only. libssl/libcrypto are absent by
+          # construction because the build keeps rustls; any other library fails
+          # the job rather than shipping an artifact that will not load on
+          # SteamOS. ldd prints the loader line as an absolute path, so each
+          # token is reduced to its basename before the allowlist match.
+          allowed='^(linux-vdso\.so\.1|ld-linux-x86-64\.so\.2|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1|libatomic\.so\.1|libdbus-1\.so\.3)$'
+          unexpected="$(awk '{print $1}' linkage.txt | sed 's@^.*/@@' | grep -vE "$allowed" || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "::error::non-basic or OpenSSL linkage: $unexpected"
+            exit 1
+          fi
       - name: Pack
         run: |
+          set -euo pipefail
           mkdir -p dist
-          tar -C daemon/target/release -czf \
-            "dist/${BINARY}-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" "${BINARY}"
+          tar -C daemon/target/x86_64-unknown-linux-gnu/release -czf "dist/${ASSET}" "${BINARY}"
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: tarball
-          path: dist/*.tar.gz
+          name: portable
+          path: dist/*
           if-no-files-found: error
 
   arch:
@@ -76,7 +108,7 @@ jobs:
 
   release:
     name: Publish release assets
-    needs: [tarball, arch]
+    needs: [portable, arch]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -89,4 +121,5 @@ jobs:
         with:
           files: |
             dist/*.tar.gz
+            dist/*.tar.gz.sha256
             dist/*.pkg.tar.zst

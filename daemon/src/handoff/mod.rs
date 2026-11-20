@@ -2,11 +2,120 @@
 //! Manages the handoff logic between Linux and Samsung phone
 
 #![allow(dead_code)] // State machine scaffolding for call and multi-device handoff.
+use std::time::{Duration, Instant};
+
 use tracing::{info, warn};
 
+use crate::ble::coc_session::REASON_CALL;
 use crate::ble::BleAdvEvent;
 use crate::protocol::AudioState;
 use crate::rfcomm::RfcommEvent;
+
+/// Bound on a call-reason response the daemon still expects. [FR-017]
+const CALL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Why a Buds switch is requested. [FR-017]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchReason {
+    Media,
+    Call,
+}
+
+impl SwitchReason {
+    /// Maps the protocol reason byte; only the call reason is not media.
+    /// [FR-017]
+    pub fn from_byte(reason: u8) -> Self {
+        if reason == REASON_CALL {
+            Self::Call
+        } else {
+            Self::Media
+        }
+    }
+}
+
+/// A call-reason response the daemon still expects. [FR-017]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingCallResponse {
+    adv_id: u16,
+    address: [u8; 6],
+    since: Instant,
+}
+
+/// Call policy for handoff requests.
+///
+/// [FR-017] An active HFP call blocks media-reason requests, while call-reason
+/// requests always proceed. Call state is entered on a call-reason request from
+/// the phone and left when the phone reports the call ended, so a lost response
+/// cannot lock media behind a blanket timer. A response is classified as
+/// call-reason only when it matches the pending call-reason exchange; a
+/// media-reason response never clears the guard.
+#[derive(Debug)]
+pub struct CallGuard {
+    call_active: bool,
+    pending: Option<PendingCallResponse>,
+    response_timeout: Duration,
+}
+
+impl Default for CallGuard {
+    fn default() -> Self {
+        Self {
+            call_active: false,
+            pending: None,
+            response_timeout: CALL_RESPONSE_TIMEOUT,
+        }
+    }
+}
+
+impl CallGuard {
+    /// True while an HFP call owns the Buds.
+    pub fn call_active(&self) -> bool {
+        self.call_active
+    }
+
+    /// Marks a call active on a call-reason request from the phone.
+    pub fn call_started(&mut self) {
+        self.call_active = true;
+    }
+
+    /// Clears the call state when the phone reports the call ended.
+    pub fn call_ended(&mut self) {
+        self.call_active = false;
+        self.pending = None;
+    }
+
+    /// Records that the daemon asked for the Buds for a call.
+    pub fn expect_call_response(&mut self, adv_id: u16, address: [u8; 6], now: Instant) {
+        self.pending = Some(PendingCallResponse {
+            adv_id,
+            address,
+            since: now,
+        });
+    }
+
+    /// Classifies a response and clears a matching call exchange.
+    ///
+    /// Returns [`SwitchReason::Call`] only for the response to a call-reason
+    /// request; every other response is media, so it cannot clear the call
+    /// guard. [FR-017]
+    pub fn on_response(&mut self, adv_id: u16, address: [u8; 6], now: Instant) -> SwitchReason {
+        let Some(pending) = self.pending else {
+            return SwitchReason::Media;
+        };
+        if pending.adv_id == adv_id && pending.address == address {
+            self.pending = None;
+            return SwitchReason::Call;
+        }
+        if now.duration_since(pending.since) >= self.response_timeout {
+            self.pending = None;
+        }
+        SwitchReason::Media
+    }
+
+    /// True when a media-reason request must be suppressed.
+    pub fn blocks_media(&self) -> bool {
+        self.call_active
+    }
+}
 
 /// Current handoff state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,3 +270,62 @@ pub enum HandoffAction {
     SetSeamless(bool),
     SendHandoffCommand(Vec<u8>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUDS: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+
+    #[test]
+    fn an_active_call_blocks_media_reason_only() {
+        let mut guard = CallGuard::default();
+        guard.call_started();
+        assert!(guard.blocks_media());
+        assert_eq!(guard.on_response(1, BUDS, Instant::now()), SwitchReason::Media);
+        assert!(guard.blocks_media());
+    }
+
+    #[test]
+    fn a_media_response_does_not_clear_the_guard() {
+        let now = Instant::now();
+        let mut guard = CallGuard::default();
+        guard.call_started();
+        guard.expect_call_response(0x1234, BUDS, now);
+        assert_eq!(guard.on_response(0x9999, BUDS, now), SwitchReason::Media);
+        assert!(guard.blocks_media());
+    }
+
+    #[test]
+    fn a_call_response_is_scoped_to_its_exchange() {
+        let now = Instant::now();
+        let mut guard = CallGuard::default();
+        guard.expect_call_response(0x1234, BUDS, now);
+        assert_eq!(
+            guard.on_response(0x1234, BUDS, now),
+            SwitchReason::Call
+        );
+        assert_eq!(
+            guard.on_response(0x1234, BUDS, now),
+            SwitchReason::Media,
+            "the pending call exchange is consumed by its response"
+        );
+    }
+
+    #[test]
+    fn a_lost_call_response_does_not_lock_media() {
+        let now = Instant::now();
+        let mut guard = CallGuard::default();
+        guard.expect_call_response(7, BUDS, now);
+        assert!(!guard.blocks_media());
+    }
+
+    #[test]
+    fn the_call_ends_on_the_phone_signal() {
+        let mut guard = CallGuard::default();
+        guard.call_started();
+        guard.call_ended();
+        assert!(!guard.blocks_media());
+    }
+}
+

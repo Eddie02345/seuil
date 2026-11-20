@@ -31,11 +31,15 @@ shown and the conflict is tagged.
 | Channel | Purpose | Identifier | Evidence |
 |---|---|---|---|
 | BLE advertising | Device presence, audio state, account identity, auto switch capability | Company ID `0x0075` (117) | observed |
-| RFCOMM SPP | Auto switch commands, handoff, resource sharing, copy/paste | UUID `3A622E58-C035-4A26-928C-5601DDE7C657` | observed |
-| L2CAP CoC | Samsung proprietary stream, PSM negotiated | `listenUsingInsecureL2capChannel()` | observed |
+| RFCOMM SPP | Buds opcodes (`SET_SEAMLESS_CONNECTION` and its acknowledgement), resource sharing, copy/paste | UUID `3A622E58-C035-4A26-928C-5601DDE7C657` | observed |
+| L2CAP CoC | Phone-directed auto switch commands (`BUDS_SWITCH` request/response, ready events, get-device-state); Samsung proprietary stream, PSM negotiated | `listenUsingInsecureL2capChannel()` | observed |
 
-The BLE path consumes advertisements from earbuds and peer devices. Control
-commands and acknowledgements travel over SPP in the code paths examined.
+The BLE path consumes advertisements from earbuds and peer devices. After the
+account handshake, phone-directed auto switch commands travel over the BLE
+L2CAP CoC (section 5.5): the BUDS_SWITCH request and response, ready events,
+get-device-state, and the channel keepalive. `[VERIFIED live]` Buds opcodes
+travel over RFCOMM SPP (sections 3 and 4): SET_SEAMLESS_CONNECTION and its
+acknowledgement. `[VERIFIED]`
 
 ---
 
@@ -172,9 +176,14 @@ record with relative offsets `[VERIFIED]`:
 | +9 | `F` | 1 | Feature/capability flags |
 | +10 | `AP` | 1 | Audio playback info; `4096` (`0x1000`) sentinel when absent |
 
-The decoder anchors the notification byte at absolute offset 9, and the parser computes `NS = value_start + 8`.
+The daemon's implemented behavior is authoritative, and it decodes the
+notification byte on two paths. In the account-bound LTV walk the audio state
+derives from the record-local byte at `body_start + 3`
+(`daemon/src/ble/mod.rs:219`, `daemon/src/ble/mod.rs:234-242`). In the unbound
+fallback path it derives from absolute manufacturer-data offset 9, masked
+`0xF8` (`daemon/src/ble/mod.rs:152-160`). `[VERIFIED]`
 `[NEEDS VALIDATION]`: capture a short and a long advertisement to reconcile the
-value start offset with absolute index 9.
+fallback anchor at absolute offset 9 with the record-local byte.
 
 #### NS flag bits
 
@@ -197,8 +206,9 @@ Bits 0, 3, 6 and 7 are unused by these helpers; semantics unknown.
 
 ### 2.6 Buds audio state
 
-Audio state derives from `NS` at absolute index 9 and is computed only when the
-packet is longer than 9 bytes `[VERIFIED]`:
+In the fallback path, used when the account-bound LTV parse is unavailable,
+audio state derives from `NS` at absolute index 9 and is computed only when the
+packet is longer than 9 bytes (`daemon/src/ble/mod.rs:152-160`) `[VERIFIED]`:
 
 ```text
 audio state (manufacturer data offset 9, masked 0xF8)
@@ -215,7 +225,8 @@ audio state (manufacturer data offset 9, masked 0xF8)
 | other | 2 | Disconnected / in case |
 
 The mask ignores NS bits 0 to 2, so the feature, AP and secondary bits do not
-affect audio state.
+affect audio state. When the account-bound LTV record is available, audio state
+comes from its record-local notification byte instead (section 2.5).
 
 ### 2.7 Wear / case state
 
@@ -799,13 +810,15 @@ Phone A                      Buds                      Phone B
   |                            |                          |
   | SPP connect (UUID ..C657)  |                          |
   |<==========================>|<========================>|
+  | CoC connect (L2CAP)        |                          |
+  |<=====================================================>|
   | makeReadyEvent (appSeq 10) |                          |
-  |--------------------------->|                          |
+  |------------------------------------------------------>|
   | makeAutoSwitchRequest      |                          |
   | (appSeq 1, type 1)         |                          |
-  |--------------------------->|                          |
+  |------------------------------------------------------>|
   | HandoffCommand result=1    |                          |
-  |<---------------------------|                          |
+  |<------------------------------------------------------|
   | SET_SEAMLESS_CONNECTION    |                          |
   | 0xAF 01                    |                          |
   |--------------------------->|                          |

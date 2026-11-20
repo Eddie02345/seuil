@@ -1,0 +1,1033 @@
+{
+  "project_name": "Seuil SteamOS Hardening Sprint",
+  "version": "1.0",
+  "date": "2026-11-18",
+  "status": "draft",
+  "requirements": [
+    {
+      "id": "BR-001",
+      "type": "business",
+      "text": "To keep Galaxy Buds auto switch trustworthy on Linux, the business must deliver a daemon that survives suspend/resume, Bluetooth power toggles, service restarts, and malformed BLE traffic without panicking or wedging.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": [],
+      "scenarios": []
+    },
+    {
+      "id": "BR-002",
+      "type": "business",
+      "text": "To grow the user base onto the Steam Deck, the business must support installing and running seuil on stock SteamOS without disabling the immutable rootfs or installing a compiler toolchain.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": [],
+      "scenarios": []
+    },
+    {
+      "id": "BR-003",
+      "type": "business",
+      "text": "To make faults diagnosable without log archaeology, the business must ship a one-command diagnostic with stable exit codes and a blocking/advisory split.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": [],
+      "scenarios": []
+    },
+    {
+      "id": "BR-004",
+      "type": "business",
+      "text": "To protect user trust in Samsung account security, the business must preserve credential integrity across writes, restarts, and refresh cycles and never expose key material.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": [],
+      "scenarios": []
+    },
+    {
+      "id": "BR-005",
+      "type": "business",
+      "text": "To make handoffs deterministic, the business must prevent ping-pong switching and mid-game audio hijacks driven by silent or spurious streams.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": [],
+      "scenarios": []
+    },
+    {
+      "id": "UR-001",
+      "type": "user",
+      "text": "The Steam Deck user shall be able to install seuil from a prebuilt release artifact into their home directory without a compiler toolchain and have the service start and stay started across Gaming Mode and Desktop Mode switches.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "Steam Deck user",
+      "traces_to": ["BR-002"],
+      "scenarios": []
+    },
+    {
+      "id": "UR-002",
+      "type": "user",
+      "text": "The user shall be able to run one diagnostic command that reports each runtime dependency and service state, separates blocking from advisory problems, and states what to do next, including that first-run setup belongs in Desktop Mode.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "Deck user and desktop user",
+      "traces_to": ["BR-003"],
+      "scenarios": []
+    },
+    {
+      "id": "UR-003",
+      "type": "user",
+      "text": "The desktop user shall experience handoffs that do not flip rapidly between the phone and Linux and never lose the media link mid-handoff.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "Desktop user",
+      "traces_to": ["BR-001", "BR-005"],
+      "scenarios": []
+    },
+    {
+      "id": "UR-004",
+      "type": "user",
+      "text": "The gamer shall have the Buds stay with the current host unless real, audible media or game audio is playing; silent tabs, muted players, UI sounds, and voice-chat streams shall not trigger a media handoff, and an active call shall be honored as a call.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "Gamer and desktop user",
+      "traces_to": ["BR-005"],
+      "scenarios": []
+    },
+    {
+      "id": "UR-005",
+      "type": "user",
+      "text": "The user shall have a daemon that recovers by itself after suspend/resume, Bluetooth power toggles, and bluetoothd or PipeWire restarts, without a wedged or half-dead state.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "Desktop user and deck user",
+      "traces_to": ["BR-001"],
+      "scenarios": []
+    },
+    {
+      "id": "UR-006",
+      "type": "user",
+      "text": "The user shall trust that Samsung account credentials never appear in terminal output or logs and are never silently replaced after a partial failure.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "All users",
+      "traces_to": ["BR-004"],
+      "scenarios": []
+    },
+    {
+      "id": "UR-007",
+      "type": "user",
+      "text": "The maintainer shall be able to run the full verification suite and receive a definitive pass or fail with zero warnings, plus tests that encode the settled timing and parsing boundaries.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": "Maintainer",
+      "traces_to": ["BR-003"],
+      "scenarios": []
+    },
+    {
+      "id": "FR-001",
+      "type": "functional",
+      "text": "seuil doctor SHALL run every check, print one line per check, exit 0 when all pass, 1 when any blocking check fails, and 2 on an internal error.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-002", "UR-007"],
+      "scenarios": [
+        {
+          "name": "Healthy system",
+          "given": "BlueZ reachable, adapter powered, PipeWire socket present, valid credentials, and a parsed advertisement carrying a CoC PSM",
+          "when": "the user runs seuil doctor",
+          "then": "the command prints one line per check, every line reports pass, and the exit code is 0"
+        },
+        {
+          "name": "Credentials absent is blocking",
+          "given": "no ~/.config/seuil/credentials.json",
+          "when": "the user runs seuil doctor",
+          "then": "the credentials check prints a blocking failure that names the Desktop Mode setup path AND the exit code is 1"
+        },
+        {
+          "name": "PSM reported as observed",
+          "given": "the latest advertisement carries PSM 0x0081 (129)",
+          "when": "the user runs seuil doctor",
+          "then": "the PSM line reports the observed 0x0081 and notes 128 as the default constant AND the line does not fail merely because the value differs from the default"
+        },
+        {
+          "name": "PSM check fails on connect failure",
+          "given": "the observed PSM whose CoC connect fails",
+          "when": "the user runs seuil doctor",
+          "then": "the PSM check fails naming the connect failure AND the exit code is 1"
+        },
+        {
+          "name": "Internal error",
+          "given": "the doctor's own machinery fails, for example an unrecoverable I/O error in its check runner",
+          "when": "the user runs seuil doctor",
+          "then": "the command prints an internal-error line naming the failing subsystem and exits 2"
+        }
+      ]
+    },
+    {
+      "id": "FR-002",
+      "type": "functional",
+      "text": "The installer SHALL provide a prebuilt path (install.sh --from-release) that downloads the release artifact into ~/.local/bin without invoking any compiler or package manager.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-001"],
+      "scenarios": [
+        {
+          "name": "Fresh Deck install",
+          "given": "a stock SteamOS Deck with network access and no Rust toolchain",
+          "when": "the user runs install.sh --from-release",
+          "then": "the binary lands at ~/.local/bin/seuil, is executable, and no compiler or package manager ran"
+        },
+        {
+          "name": "Download failure",
+          "given": "the release URL is unreachable or the checksum does not match",
+          "when": "the user runs install.sh --from-release",
+          "then": "the installer exits non-zero with a clear message and leaves no partial executable in ~/.local/bin"
+        }
+      ]
+    },
+    {
+      "id": "FR-003",
+      "type": "functional",
+      "text": "The user service SHALL stay started across a Gaming Mode to Desktop Mode session change and SHALL start on a pure Gaming Mode boot, waiting for Bluetooth readiness instead of exiting when BlueZ is not yet up.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-001"],
+      "scenarios": [
+        {
+          "name": "Mode round trip",
+          "given": "the service is active in Gaming Mode",
+          "when": "the user switches to Desktop Mode and later back to Gaming Mode",
+          "then": "the service remains active throughout or restarts itself within its unit policy, and the daemon is functional after the switch"
+        },
+        {
+          "name": "Bluetooth not ready at login",
+          "given": "the user manager starts the unit before bluetoothd is ready",
+          "when": "the daemon starts and the adapter is not yet powered",
+          "then": "the daemon waits with backoff instead of exiting, and proceeds once BlueZ is reachable"
+        }
+      ]
+    },
+    {
+      "id": "FR-004",
+      "type": "functional",
+      "text": "Missing optional runtime tools SHALL degrade only the matching feature with a clear persistent warning, and a failing tool invocation SHALL be distinguished from a missing service record.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-002", "UR-005"],
+      "scenarios": [
+        {
+          "name": "sdptool missing",
+          "given": "SteamOS, whose bluez-utils ships no sdptool",
+          "when": "the daemon starts",
+          "then": "startup completes, the SDP-dependent step is skipped, and a warning names sdptool as absent"
+        },
+        {
+          "name": "sdptool fails, service record exists",
+          "given": "sdptool present but its local SDP query exits non-zero because bluetoothd runs without the compatibility flag",
+          "when": "the daemon runs the SDP step",
+          "then": "the warning names the compatibility requirement rather than reporting the service record as absent"
+        },
+        {
+          "name": "Audio probe tools missing",
+          "given": "pactl or playerctl not installed",
+          "when": "the daemon runs and the user runs doctor",
+          "then": "both report that audio activity detection is degraded or disabled for that source"
+        }
+      ]
+    },
+    {
+      "id": "FR-005",
+      "type": "functional",
+      "text": "Setup SHALL print the optional BlueZ experimental drop-in content and the exact privileged command that installs it, SHALL write /etc only behind an explicit flag, and SHALL include the SteamOS /etc allowlist caveat in the printed text.",
+      "priority": "should",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-001", "UR-002"],
+      "scenarios": [
+        {
+          "name": "Default run prints only",
+          "given": "setup runs without the explicit flag",
+          "when": "the BlueZ step executes",
+          "then": "setup prints the override.conf content and the exact sudo install command, writes nothing under /etc, and notes that SteamOS keeps /etc files only via its migration allowlist"
+        },
+        {
+          "name": "Explicit flag writes",
+          "given": "the user passes the explicit flag",
+          "when": "setup runs",
+          "then": "the privileged command executes, and a later doctor run reports the experimental flag state"
+        }
+      ]
+    },
+    {
+      "id": "FR-006",
+      "type": "functional",
+      "text": "The release pipeline SHALL produce an x86_64-unknown-linux-gnu artifact built on a Debian 11 (glibc 2.31) baseline with rustls so no OpenSSL links, verified to run on glibc 2.31 or newer.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-001"],
+      "scenarios": [
+        {
+          "name": "Pipeline verification passes",
+          "given": "the release workflow builds the artifact in its Debian 11 baseline container",
+          "when": "the linkage check runs",
+          "then": "it lists only basic system libraries compatible with glibc 2.31, no OpenSSL, and the job succeeds"
+        },
+        {
+          "name": "Linkage check fails",
+          "given": "a dependency change pulls in a library newer than the baseline",
+          "when": "the linkage check runs",
+          "then": "the release job fails rather than shipping an artifact that will not load on SteamOS"
+        }
+      ]
+    },
+    {
+      "id": "FR-007",
+      "type": "functional",
+      "text": "The README SHALL document the Steam Deck install path and the sprint SHALL record the SteamOS install architecture in a numbered decision record under docs/decisions/.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-001", "UR-002"],
+      "scenarios": [
+        {
+          "name": "Reader follows the README",
+          "given": "a fresh Deck and the README",
+          "when": "the reader follows the Steam Deck section",
+          "then": "they reach a doctor-verified running service without leaving $HOME and know first-run setup belongs in Desktop Mode"
+        },
+        {
+          "name": "Decision recorded",
+          "given": "the sprint completes",
+          "when": "a contributor looks for the install layout and drop-in rationale",
+          "then": "the numbered decision record states the settled choices with their rationale"
+        },
+        {
+          "name": "Documentation missing",
+          "given": "the sprint's changes landed",
+          "when": "the README's Steam Deck section or the numbered decision record under docs/decisions/ is absent",
+          "then": "the requirement fails acceptance with the missing artifact named"
+        }
+      ]
+    },
+    {
+      "id": "FR-008",
+      "type": "functional",
+      "text": "The manufacturer-data parser SHALL accept payloads whose format byte validates at either offset 2 or offset 3, SHALL reject only when both readings fail, and SHALL survive truncated or malformed records without panicking and without discarding valid records elsewhere in the buffer.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005"],
+      "scenarios": [
+        {
+          "name": "Offset-3 reading accepted",
+          "given": "manufacturer data 02 18 00 01 00 80 07 48 00 48 00 (11 bytes; format byte 0x01 at offset 3, context bytes at offsets 4 to 8, fallback audio byte at 9, per docs/PROTOCOL_SPEC.md sections 2.2, 2.5, and 2.6)",
+          "when": "the parser runs",
+          "then": "the payload decodes to a device context with CoC PSM 0x0080 (128), DS 0x07, NS 0x48, and F 0x00 AND the audio state is Streaming (fallback anchor byte 9 = 0x48)"
+        },
+        {
+          "name": "Offset-2 reading accepted",
+          "given": "the same logical payload with the format byte at offset 2: 02 18 01 00 00 80 07 48 00 48 00 (the original-findings reading recorded in docs/PROTOCOL_SPEC.md section 2.8)",
+          "when": "the parser runs",
+          "then": "the payload decodes to the same device context (CoC PSM 0x0080, DS 0x07, NS 0x48, F 0x00) and audio state Streaming as the offset-3 reading, rather than being rejected"
+        },
+        {
+          "name": "Recoverable malformed record skipped",
+          "given": "a buffer whose first LTV record is malformed without overrunning the buffer end (for example a zero-length record) and whose later records include a valid type 1 record",
+          "when": "the parser walks the buffer",
+          "then": "the walk skips the malformed record and still parses the later valid type 1 record, with no panic"
+        },
+        {
+          "name": "Overrunning record ends the walk safely",
+          "given": "a record whose declared length overruns the buffer end",
+          "when": "the walk encounters it",
+          "then": "the walk ends gracefully with no panic AND any type 1 record already decoded before the overrun remains in the parse result"
+        },
+        {
+          "name": "Garbage payload",
+          "given": "random bytes prefixed with a plausible Samsung header",
+          "when": "the parser runs",
+          "then": "parsing returns rejection without panicking"
+        },
+        {
+          "name": "Account-bound audio-state anchor",
+          "given": "an account-bound advertisement whose type 1 record carries NS 0x48 at the record-local anchor (body_start + 3, docs/PROTOCOL_SPEC.md section 2.5)",
+          "when": "the parser runs",
+          "then": "the audio state is Streaming AND the same record with NS 0x08 parses Idle AND the same record with NS 0x00 parses Disconnected"
+        },
+        {
+          "name": "Fallback audio-state anchor",
+          "given": "an unbound advertisement whose account-bound parse is unavailable, with manufacturer-data byte 9 equal to 0x48 (masked 0xF8, docs/PROTOCOL_SPEC.md sections 2.5 and 2.6)",
+          "when": "the parser runs",
+          "then": "the audio state is Streaming AND byte 9 equal to 0x08 parses Idle AND byte 9 equal to 0x18 parses Disconnected"
+        }
+      ]
+    },
+    {
+      "id": "FR-009",
+      "type": "functional",
+      "text": "On suspend (logind PrepareForSleep true) and on adapter power-off, the daemon SHALL tear down CoC channels and stop scanning and advertising; on wake or power-on it SHALL re-initialize each session exactly once, with no duplicate advertisements, leaked tasks, or stale channel entries.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005"],
+      "scenarios": [
+        {
+          "name": "Suspend and wake",
+          "given": "the daemon running with one advertisement, one discovery session, and one CoC channel",
+          "when": "the system suspends and later wakes",
+          "then": "teardown closed the channel and stopped scan and advertising, and after wake exactly one advertisement, one discovery session, and one redial attempt exist"
+        },
+        {
+          "name": "Adapter power toggle",
+          "given": "the daemon running",
+          "when": "the adapter powers off and on again",
+          "then": "the daemon reaches the same clean state as after a wake, without needing a service restart"
+        },
+        {
+          "name": "Rapid sleep and wake flapping",
+          "given": "repeated quick suspend and wake cycles",
+          "when": "the cycles settle",
+          "then": "the daemon converges to exactly one active advertisement and one discovery session, with no leaked tasks"
+        }
+      ]
+    },
+    {
+      "id": "FR-010",
+      "type": "functional",
+      "text": "The daemon SHALL enforce a 10 s minimum dwell between handoff requests and an exponential CoC connect backoff starting at 1 s and capped at 60 s, both configurable in config.toml with those defaults.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-003"],
+      "scenarios": [
+        {
+          "name": "Second request inside the dwell",
+          "given": "a handoff request sent less than 10 s ago",
+          "when": "a new trigger fires",
+          "then": "the new request is suppressed and logged as dwell-blocked"
+        },
+        {
+          "name": "Request after the dwell",
+          "given": "the last handoff request was 10 s ago or more",
+          "when": "a new trigger fires",
+          "then": "the request proceeds"
+        },
+        {
+          "name": "Backoff sequence on repeated connect failures",
+          "given": "the phone is unreachable",
+          "when": "connect attempts repeatedly fail",
+          "then": "retry delays follow 1, 2, 4, and so on, capped at 60 s"
+        },
+        {
+          "name": "Custom configuration honored",
+          "given": "config.toml sets a different dwell or backoff",
+          "when": "the daemon runs",
+          "then": "the configured values are used"
+        }
+      ]
+    },
+    {
+      "id": "FR-011",
+      "type": "functional",
+      "text": "The daemon SHALL pair and dial only advertisements from the configured phone address and SHALL verify inbound advertisement checksums against the account fingerprint before acting on them.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005"],
+      "scenarios": [
+        {
+          "name": "Spoofed advertisement ignored",
+          "given": "a 0x0075 advertisement with a type 1 record from an address other than the configured phone",
+          "when": "the scan handler processes it",
+          "then": "no pairing and no dial occur, and a warning names the rejected address"
+        },
+        {
+          "name": "Bad checksum ignored",
+          "given": "an advertisement from the configured phone whose checksum does not match the account fingerprint",
+          "when": "the scan handler processes it",
+          "then": "the payload is not acted on"
+        },
+        {
+          "name": "Valid advertisement acted on",
+          "given": "a type 1 advertisement from the configured phone whose checksum matches the account fingerprint",
+          "when": "the dial path evaluates it",
+          "then": "pairing and dial proceed under the timing requirements"
+        }
+      ]
+    },
+    {
+      "id": "FR-012",
+      "type": "functional",
+      "text": "Background event loops SHALL handle address-parse and crypto-size failures as errors, bound keepalive and frame reads with timeouts configurable in config.toml (default 10 s each), and cap per-peer bookkeeping maps at a configurable limit (config.toml, default 256 entries).",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005"],
+      "scenarios": [
+        {
+          "name": "Malformed address string",
+          "given": "an address string that fails to parse reaches an event handler",
+          "when": "the handler processes it",
+          "then": "the failure is logged as an error and the loop and its task continue"
+        },
+        {
+          "name": "Stalled peer",
+          "given": "a CoC peer stops responding mid-frame",
+          "when": "the read timeout expires at its configured limit (default 10 s)",
+          "then": "the channel tears down cleanly and the map entry is removed"
+        },
+        {
+          "name": "Crypto-size failure contained",
+          "given": "a crypto operation receives a wrong-size key or nonce",
+          "when": "the handler processes it",
+          "then": "the failure is logged as an error and the loop continues without panicking"
+        },
+        {
+          "name": "Keepalive timeout tears down",
+          "given": "a CoC peer that stops acknowledging keepalive writes",
+          "when": "the keepalive timeout expires at its configured limit (default 10 s)",
+          "then": "the channel tears down cleanly and its map entry is removed"
+        },
+        {
+          "name": "Rotating spoofed addresses",
+          "given": "hours of advertisements from rotating random addresses",
+          "when": "the bookkeeping maps are inspected",
+          "then": "their size never exceeds the per-peer bookkeeping cap configured in config.toml, defaulting to 256 entries"
+        }
+      ]
+    },
+    {
+      "id": "FR-013",
+      "type": "functional",
+      "text": "The daemon SHALL route auto switch traffic per the settled transport split: phone-directed commands over the BLE L2CAP CoC and Buds opcodes (SET_SEAMLESS_CONNECTION and its acknowledgement) over RFCOMM SPP, with the Buds SPP frame parser rejecting short or malformed frames without panicking.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-003", "UR-005"],
+      "scenarios": [
+        {
+          "name": "Phone-directed commands ride the CoC",
+          "given": "the CoC established by the account handshake",
+          "when": "a BUDS_SWITCH request or response, ready event, or get-device-state flows",
+          "then": "it travels on the BLE CoC channel AND no phone-directed command travels over SPP"
+        },
+        {
+          "name": "Seamless handoff delivered",
+          "given": "a yield to the phone completes",
+          "when": "the handoff action runs",
+          "then": "SET_SEAMLESS_CONNECTION reaches the Buds over SPP and the acknowledgement is processed"
+        },
+        {
+          "name": "Malformed SPP frame",
+          "given": "an SPP frame with a declared size under 2 or a truncated body",
+          "when": "the frame parser runs",
+          "then": "the frame is dropped with a warning and the session continues without panic"
+        }
+      ]
+    },
+    {
+      "id": "FR-014",
+      "type": "functional",
+      "text": "The daemon SHALL prevent concurrency faults with observable outcomes: a closed channel leaves no entry that blocks future dials to that peer, one peer's blocked channel does not stall other peers, and a hung connect attempt does not accumulate duplicates.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005"],
+      "scenarios": [
+        {
+          "name": "Closed channel does not block redial",
+          "given": "a dial whose channel closes immediately",
+          "when": "the same peer is dialed again",
+          "then": "the new dial proceeds, not blocked by the old one's state"
+        },
+        {
+          "name": "Backpressure does not stall unrelated peers",
+          "given": "one peer's channel blocked or saturated",
+          "when": "another peer's traffic flows",
+          "then": "the other peer is served"
+        },
+        {
+          "name": "Hung attempt does not duplicate",
+          "given": "a first connect attempt that has not completed",
+          "when": "the retry timer fires",
+          "then": "no duplicate attempt runs concurrently AND a later retry proceeds once the first attempt resolves or times out"
+        }
+      ]
+    },
+    {
+      "id": "FR-015",
+      "type": "functional",
+      "text": "Discovery restarts SHALL stop the previous session before reapplying filters, a rejected discovery filter SHALL produce a visible warning, and the advertiser SHALL retry registration failures with backoff instead of exiting.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005"],
+      "scenarios": [
+        {
+          "name": "Adapter loss and return",
+          "given": "the adapter disappears and comes back",
+          "when": "the scan loop restarts",
+          "then": "exactly one discovery session is active afterward"
+        },
+        {
+          "name": "Previous session stopped first",
+          "given": "a discovery session running when the scan loop restarts",
+          "when": "the restart re-applies the discovery filter and opens a new stream",
+          "then": "the previous session was stopped before the filter was re-applied AND exactly one discovery session is active"
+        },
+        {
+          "name": "Advertisement registration collision",
+          "given": "an advertisement re-registration that fails because the previous one is still unregistering",
+          "when": "the advertiser handles the error",
+          "then": "it retries with backoff and advertising continues for the process lifetime"
+        },
+        {
+          "name": "Filter rejection surfaced",
+          "given": "BlueZ rejects the discovery filter",
+          "when": "the scan loop continues unfiltered",
+          "then": "a warning names the rejection instead of silently proceeding"
+        }
+      ]
+    },
+    {
+      "id": "FR-016",
+      "type": "functional",
+      "text": "The media monitor SHALL treat a stream as active only while it is RUNNING and its peak stays above -60 dBFS across a 200 ms window, SHALL exclude capture-side and communication-class streams, and SHALL expose the threshold and window as config.toml keys with those defaults.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-004"],
+      "scenarios": [
+        {
+          "name": "Silent tab is not activity",
+          "given": "a browser tab holding a RUNNING but digitally silent stream",
+          "when": "the monitor evaluates it",
+          "then": "the stream is not active and no handoff request fires"
+        },
+        {
+          "name": "Real game audio is activity",
+          "given": "game audio playing above the threshold",
+          "when": "the peak stays above -60 dBFS across the 200 ms window",
+          "then": "the stream is active and one media-reason request fires"
+        },
+        {
+          "name": "Communication stream excluded",
+          "given": "a voice-chat stream classified as communication or capture",
+          "when": "the monitor evaluates it",
+          "then": "it does not count as media activity"
+        },
+        {
+          "name": "Thresholds configurable",
+          "given": "config.toml sets a different threshold or window",
+          "when": "the monitor runs",
+          "then": "the configured values are used"
+        }
+      ]
+    },
+    {
+      "id": "FR-017",
+      "type": "functional",
+      "text": "An active HFP call SHALL block media-reason handoffs, call-reason switching SHALL remain allowed during HFP, and the call guard SHALL be scoped to call-reason responses rather than cleared by any response.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-004", "UR-003"],
+      "scenarios": [
+        {
+          "name": "Media trigger during a call",
+          "given": "an active HFP call on the Buds",
+          "when": "local media starts",
+          "then": "the media-reason handoff is suppressed"
+        },
+        {
+          "name": "Call-reason switching during HFP",
+          "given": "an active HFP call",
+          "when": "a call-reason switch request arrives",
+          "then": "it proceeds"
+        },
+        {
+          "name": "Lost call response does not lock media",
+          "given": "a call-reason response that never arrives",
+          "when": "media triggers later",
+          "then": "media handoffs are not blocked by a blanket timed lock"
+        }
+      ]
+    },
+    {
+      "id": "FR-018",
+      "type": "functional",
+      "text": "Probe or service failures SHALL NOT fabricate activity edges: a failed probe SHALL hold the last known state rather than emitting a stop followed by a start, probes SHALL be timeout-bounded, and the monitor task SHALL be supervised so its death is visible and recoverable.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-004", "UR-005"],
+      "scenarios": [
+        {
+          "name": "Probe tool absent",
+          "given": "pactl missing from the system",
+          "when": "the monitor runs",
+          "then": "one persistent warning is logged, the last known activity state is held, and no stop/start edge pair is emitted"
+        },
+        {
+          "name": "Probe hangs",
+          "given": "a probe subprocess that never returns",
+          "when": "its timeout expires",
+          "then": "the tick completes and later ticks continue"
+        },
+        {
+          "name": "Monitor task dies",
+          "given": "the media monitor task exits or panics",
+          "when": "the supervisor notices",
+          "then": "the task is restarted and an error is logged"
+        },
+        {
+          "name": "PipeWire restart recovery",
+          "given": "the PipeWire daemon restarting while the daemon runs",
+          "when": "the monitor reconnects after the restart",
+          "then": "activity evaluation resumes without a fabricated edge pair"
+        }
+      ]
+    },
+    {
+      "id": "FR-019",
+      "type": "functional",
+      "text": "On a release request the daemon SHALL verify the pause succeeded and complete profile teardown before answering the phone, and on a granted switch it SHALL retry the A2DP connect; a call-reason response SHALL NOT trigger an A2DP pull.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-003", "UR-004"],
+      "scenarios": [
+        {
+          "name": "Pause failure is reported",
+          "given": "MPRIS pause fails during a release",
+          "when": "the release completes",
+          "then": "the reply to the phone reflects the failure rather than claiming success"
+        },
+        {
+          "name": "Teardown before reply",
+          "given": "a release with A2DP and HFP links up",
+          "when": "the daemon answers the phone",
+          "then": "the profile disconnects have completed or their failure is reported in the reply's result path"
+        },
+        {
+          "name": "A2DP pull retries",
+          "given": "a granted media switch whose first A2DP connect fails or is slow",
+          "when": "the connect retries",
+          "then": "bounded retries occur before giving up with a warning"
+        },
+        {
+          "name": "Call-reason grant leaves media alone",
+          "given": "the phone grants a call-reason switch",
+          "when": "the grant is processed",
+          "then": "no A2DP pull is initiated"
+        }
+      ]
+    },
+    {
+      "id": "FR-020",
+      "type": "functional",
+      "text": "A missing, unreadable, or wrong-length credentials.key SHALL fail credential loading with a specific error and no silent regeneration, and credential writes SHALL be atomic, durable across a crash, and resilient to stale temp files.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-006", "UR-005"],
+      "scenarios": [
+        {
+          "name": "Key deleted, envelope remains",
+          "given": "credentials.json present and credentials.key deleted",
+          "when": "credentials load",
+          "then": "loading fails with an error naming the key file, and no new key is written"
+        },
+        {
+          "name": "Key unreadable",
+          "given": "credentials.key with permissions or ownership that deny reading",
+          "when": "credentials load",
+          "then": "loading fails naming the key file AND no new key is written"
+        },
+        {
+          "name": "Key wrong length",
+          "given": "credentials.key containing a length other than 32 bytes",
+          "when": "credentials load",
+          "then": "loading fails naming the length mismatch AND no new key is written"
+        },
+        {
+          "name": "Crash mid-save",
+          "given": "a save interrupted by a crash or power loss",
+          "when": "the daemon next loads",
+          "then": "the previous envelope is intact and decryptable"
+        },
+        {
+          "name": "Stale temp file",
+          "given": "a leftover temp file from a crashed save",
+          "when": "the next save runs",
+          "then": "the save succeeds without manual cleanup"
+        }
+      ]
+    },
+    {
+      "id": "FR-021",
+      "type": "functional",
+      "text": "The daemon and setup SHALL NOT print account keys or tokens to stdout or logs, and debug formatting of credential structures SHALL redact secret fields.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-006"],
+      "scenarios": [
+        {
+          "name": "Auth run prints no key material",
+          "given": "a successful account authentication or refresh",
+          "when": "its output is inspected",
+          "then": "no account key, token, or private key material appears in stdout or logs"
+        },
+        {
+          "name": "Debug formatting redacted",
+          "given": "a credential structure printed with debug formatting",
+          "when": "the output is inspected",
+          "then": "secret fields are redacted"
+        }
+      ]
+    },
+    {
+      "id": "FR-022",
+      "type": "functional",
+      "text": "config.toml and the systemd unit SHALL be written atomically, the config directory SHALL carry owner-only permissions, and an invalid config.toml SHALL abort startup with the parse error instead of silently using defaults.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005", "UR-006"],
+      "scenarios": [
+        {
+          "name": "Crash during config save",
+          "given": "a config write interrupted by a crash",
+          "when": "setup or the daemon next reads the file",
+          "then": "the previous content is intact"
+        },
+        {
+          "name": "Interrupted unit write",
+          "given": "a systemd unit write interrupted by a crash",
+          "when": "setup next reads the unit file",
+          "then": "the previous unit content is intact"
+        },
+        {
+          "name": "TOML typo aborts",
+          "given": "a config.toml with a syntax error",
+          "when": "the daemon starts",
+          "then": "startup aborts with an error naming the file and the parse failure"
+        },
+        {
+          "name": "Directory permissions",
+          "given": "a fresh install",
+          "when": "setup creates the config directory",
+          "then": "the directory is owner-only (0700) even when a parent defaults to group or world readable"
+        }
+      ]
+    },
+    {
+      "id": "FR-023",
+      "type": "functional",
+      "text": "The daemon SHALL refresh expiring tokens at runtime, re-enroll when the handshake indicates invalid credentials with bounded retries and a user-visible escalation, re-acquire its Bluetooth session after a bluetoothd restart, and back off pairing failures.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-005", "UR-006"],
+      "scenarios": [
+        {
+          "name": "Token refresh at runtime",
+          "given": "a service token whose expiry enters the 120-second refresh margin while the daemon runs",
+          "when": "the refresh path executes",
+          "then": "the token is refreshed and persisted without user action AND a token whose expiry lies outside the margin does not trigger a refresh"
+        },
+        {
+          "name": "Certificate rotation escalates",
+          "given": "the stored certificate rejected by the handshake",
+          "when": "retries exhaust their bound",
+          "then": "a clear escalation tells the user to rerun setup instead of retrying silently forever"
+        },
+        {
+          "name": "bluetoothd restart recovery",
+          "given": "bluetoothd restarted",
+          "when": "the daemon notices the dead session",
+          "then": "it re-acquires the adapter and session with backoff and resumes scanning and advertising"
+        },
+        {
+          "name": "Pairing failures back off",
+          "given": "repeated pairing failures, for example a permissions problem",
+          "when": "the retry loop runs",
+          "then": "delays grow rather than retrying flatly, and the failure is visible"
+        }
+      ]
+    },
+    {
+      "id": "FR-024",
+      "type": "functional",
+      "text": "The test suite SHALL cover malformed LTV and L2CAP frames under both format-byte readings, the audio-state anchor on short and long advertisements, the dwell and backoff boundaries, sleep/wake state resets, the active-audio filter rule, and the doctor exit contract, and every existing test SHALL keep passing.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-007"],
+      "scenarios": [
+        {
+          "name": "Settled boundaries covered",
+          "given": "the settled decisions",
+          "when": "the test suite runs",
+          "then": "each boundary has a test: malformed LTV frames and malformed L2CAP frames under both format-byte readings, the audio-state anchor on short and long advertisements, the 10 s dwell edge, the 1 s and 60 s backoff edges, sleep/wake state convergence, the peak-window rule, and doctor exit codes"
+        },
+        {
+          "name": "Regression held",
+          "given": "the existing test suite",
+          "when": "the hardening changes land",
+          "then": "every existing test still passes"
+        },
+        {
+          "name": "Boundary uncovered",
+          "given": "a settled boundary with no citing test",
+          "when": "the coverage listing runs",
+          "then": "the requirement fails acceptance naming the uncovered boundary"
+        }
+      ]
+    },
+    {
+      "id": "FR-025",
+      "type": "functional",
+      "text": "The sprint SHALL be verified by cargo check, cargo clippy with warnings denied, cargo test, and a release build, all passing; the live phone gate is reported pending as a separate pre-merge criterion.",
+      "priority": "must",
+      "category": null,
+      "stakeholder": null,
+      "traces_to": ["UR-007"],
+      "scenarios": [
+        {
+          "name": "All gates green",
+          "given": "the implementation complete",
+          "when": "the verification suite runs",
+          "then": "cargo check, clippy with -D warnings, cargo test, and the release build all exit 0 with zero warnings"
+        },
+        {
+          "name": "A gate fails",
+          "given": "any gate failing or warning",
+          "when": "the failure is observed",
+          "then": "the producing step fixes it before the sprint is called complete, and the live phone gate is reported as pending, not silently passed"
+        }
+      ]
+    },
+    {
+      "id": "NFR-001",
+      "type": "nonfunctional",
+      "text": "The media monitor SHALL settle an activity-state change within 1 s of the underlying stream change at default settings.",
+      "priority": "must",
+      "category": "performance",
+      "stakeholder": null,
+      "traces_to": ["FR-016"],
+      "scenarios": []
+    },
+    {
+      "id": "NFR-002",
+      "type": "nonfunctional",
+      "text": "The daemon SHALL keep account keys, tokens, and certificates out of stdout, logs, and debug output in every code path.",
+      "priority": "must",
+      "category": "security",
+      "stakeholder": null,
+      "traces_to": ["BR-004"],
+      "scenarios": []
+    },
+    {
+      "id": "NFR-003",
+      "type": "nonfunctional",
+      "text": "The daemon SHALL expose no panic path reachable from malformed BLE, L2CAP, or SPP input.",
+      "priority": "must",
+      "category": "reliability",
+      "stakeholder": null,
+      "traces_to": ["BR-001"],
+      "scenarios": []
+    },
+    {
+      "id": "NFR-004",
+      "type": "nonfunctional",
+      "text": "The daemon SHALL re-establish scanning, advertising, and its Bluetooth session within 60 s of bluetoothd becoming reachable again after a restart.",
+      "priority": "must",
+      "category": "reliability",
+      "stakeholder": null,
+      "traces_to": ["FR-009", "FR-023"],
+      "scenarios": []
+    },
+    {
+      "id": "NFR-005",
+      "type": "nonfunctional",
+      "text": "Doctor output SHALL be one line per check, each naming the check, its result, and for failures the next action.",
+      "priority": "must",
+      "category": "usability",
+      "stakeholder": null,
+      "traces_to": ["UR-002"],
+      "scenarios": []
+    },
+    {
+      "id": "NFR-006",
+      "type": "nonfunctional",
+      "text": "All user-installed state SHALL live under $HOME at the settled paths: binary at ~/.local/bin, config and credentials at ~/.config/seuil/, user unit at ~/.config/systemd/user/; any suggested /etc change documents the SteamOS allowlist caveat; the portable artifact runs on glibc 2.31 or newer with no OpenSSL linkage.",
+      "priority": "must",
+      "category": "portability",
+      "stakeholder": null,
+      "traces_to": ["BR-002"],
+      "scenarios": []
+    },
+    {
+      "id": "NFR-007",
+      "type": "nonfunctional",
+      "text": "cargo clippy on all targets with warnings denied SHALL pass with zero warnings.",
+      "priority": "must",
+      "category": "maintainability",
+      "stakeholder": null,
+      "traces_to": ["UR-007"],
+      "scenarios": []
+    }
+  ],
+  "traceability": [
+    { "requirement_id": "FR-001", "traces_to": ["UR-002", "UR-007", "BR-003"], "verified_by": "doctor exit-contract tests (FR-024)" },
+    { "requirement_id": "FR-002", "traces_to": ["UR-001", "BR-002"], "verified_by": "install path test plus SteamOS path inventory" },
+    { "requirement_id": "FR-003", "traces_to": ["UR-001", "BR-002"], "verified_by": "unit text review plus mode-switch behavior" },
+    { "requirement_id": "FR-004", "traces_to": ["UR-002", "UR-005", "BR-003", "BR-001"], "verified_by": "dependency-degradation tests" },
+    { "requirement_id": "FR-005", "traces_to": ["UR-001", "UR-002", "BR-002", "BR-003"], "verified_by": "setup output review plus flag-gate test" },
+    { "requirement_id": "FR-006", "traces_to": ["UR-001", "BR-002"], "verified_by": "release workflow linkage check" },
+    { "requirement_id": "FR-007", "traces_to": ["UR-001", "UR-002", "BR-002", "BR-003"], "verified_by": "README review plus decision record existence" },
+    { "requirement_id": "FR-008", "traces_to": ["UR-005", "BR-001"], "verified_by": "malformed-frame tests under both readings (FR-024)" },
+    { "requirement_id": "FR-009", "traces_to": ["UR-005", "BR-001"], "verified_by": "sleep/wake state-reset tests (FR-024)" },
+    { "requirement_id": "FR-010", "traces_to": ["UR-003", "BR-001", "BR-005"], "verified_by": "dwell and backoff boundary tests (FR-024)" },
+    { "requirement_id": "FR-011", "traces_to": ["UR-005", "BR-001"], "verified_by": "spoof and checksum rejection tests" },
+    { "requirement_id": "FR-012", "traces_to": ["UR-005", "BR-001"], "verified_by": "event-loop error-path tests plus NFR-003" },
+    { "requirement_id": "FR-013", "traces_to": ["UR-003", "UR-005", "BR-001", "BR-005"], "verified_by": "SPP frame tests and handoff-path review" },
+    { "requirement_id": "FR-014", "traces_to": ["UR-005", "BR-001"], "verified_by": "concurrency scenario tests" },
+    { "requirement_id": "FR-015", "traces_to": ["UR-005", "BR-001"], "verified_by": "supervision and restart-hygiene tests" },
+    { "requirement_id": "FR-016", "traces_to": ["UR-004", "BR-005"], "verified_by": "audio filter rule tests (FR-024)" },
+    { "requirement_id": "FR-017", "traces_to": ["UR-004", "UR-003", "BR-005", "BR-001"], "verified_by": "call-policy tests" },
+    { "requirement_id": "FR-018", "traces_to": ["UR-004", "UR-005", "BR-005", "BR-001"], "verified_by": "probe-failure tests" },
+    { "requirement_id": "FR-019", "traces_to": ["UR-003", "UR-004", "BR-001", "BR-005"], "verified_by": "release and pull ordering tests" },
+    { "requirement_id": "FR-020", "traces_to": ["UR-006", "UR-005", "BR-004", "BR-001"], "verified_by": "credential integrity tests" },
+    { "requirement_id": "FR-021", "traces_to": ["UR-006", "BR-004"], "verified_by": "output inspection test plus NFR-002" },
+    { "requirement_id": "FR-022", "traces_to": ["UR-005", "UR-006", "BR-001", "BR-004"], "verified_by": "config write and parse tests" },
+    { "requirement_id": "FR-023", "traces_to": ["UR-005", "UR-006", "BR-001", "BR-004"], "verified_by": "lifecycle and reconnect tests plus NFR-004" },
+    { "requirement_id": "FR-024", "traces_to": ["UR-007", "BR-003"], "verified_by": "cargo test gate (FR-025)" },
+    { "requirement_id": "FR-025", "traces_to": ["UR-007", "BR-003"], "verified_by": "the four cargo gates" },
+    { "requirement_id": "NFR-001", "traces_to": ["FR-016", "BR-005"], "verified_by": "detection latency test with a synthetic stream" },
+    { "requirement_id": "NFR-002", "traces_to": ["BR-004"], "verified_by": "credential policy review plus output tests" },
+    { "requirement_id": "NFR-003", "traces_to": ["BR-001"], "verified_by": "malformed-frame test set" },
+    { "requirement_id": "NFR-004", "traces_to": ["FR-009", "FR-023", "BR-001"], "verified_by": "restart recovery test with capped backoff" },
+    { "requirement_id": "NFR-005", "traces_to": ["UR-002", "BR-003"], "verified_by": "doctor output and exit-code tests" },
+    { "requirement_id": "NFR-006", "traces_to": ["BR-002"], "verified_by": "path inventory plus CI linkage check" },
+    { "requirement_id": "NFR-007", "traces_to": ["UR-007", "BR-003"], "verified_by": "clippy gate exit code" }
+  ],
+  "out_of_scope": [
+    { "item": "Executing the live phone acceptance gate", "reason": "No phone or Buds attached this sprint; decision 001 keeps it the pre-merge criterion", "deferred_to": "pre-merge live gate" },
+    { "item": "OAuth sign-in automation inside Gaming Mode", "reason": "Samsung sign-in needs a desktop browser; settled as a Desktop Mode activity", "deferred_to": "never (by design)" },
+    { "item": "AdvertisementMonitor1-based scanning", "reason": "Current code path needs no experimental BlueZ interfaces", "deferred_to": "future scanner rework" },
+    { "item": "musl static release target", "reason": "Settled on a gnu build with an old glibc baseline", "deferred_to": "deferred" },
+    { "item": "docs/PROTOCOL_SPEC.md quality overhaul (normative ids, marker vocabulary, remaining internal contradictions)", "reason": "The user adopted only the transport-split and audio-anchor corrections this sprint (DECISIONS.md); the remaining quality findings stay deferred", "deferred_to": "separate documentation pass" },
+    { "item": "Building from source on the Deck", "reason": "The immutable rootfs has no toolchain and wipes pacman installs on update", "deferred_to": "prebuilt path covers it" },
+    { "item": "Phone-side protocol changes", "reason": "The protocol is Samsung's; only the Linux peer changes", "deferred_to": "never" }
+  ],
+  "open_questions": []
+}
