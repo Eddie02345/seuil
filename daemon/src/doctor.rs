@@ -145,7 +145,10 @@ async fn probe_bluez(cli: &Cli) -> (CheckLine, Option<Adapter>) {
             return (
                 CheckLine::fail(
                     "bluez",
-                    format!("org.bluez is not reachable on the system bus: {error}"),
+                    format!(
+                        "org.bluez is not reachable on the system bus: {error}; start it: \
+                         sudo systemctl start bluetooth"
+                    ),
                 ),
                 None,
             );
@@ -155,7 +158,8 @@ async fn probe_bluez(cli: &Cli) -> (CheckLine, Option<Adapter>) {
                 CheckLine::fail(
                     "bluez",
                     format!(
-                        "no system-bus answer within {PROBE_TIMEOUT:?}; is bluetoothd running?"
+                        "no system-bus answer within {PROBE_TIMEOUT:?}; restart bluetoothd: \
+                         sudo systemctl restart bluetooth"
                     ),
                 ),
                 None,
@@ -187,7 +191,8 @@ async fn probe_adapter(cli: &Cli, adapter: Option<&Adapter>) -> CheckLine {
         return CheckLine::fail(
             "adapter",
             format!(
-                "{} could not be checked because BlueZ is unreachable; see the bluez line",
+                "{} could not be checked because BlueZ is unreachable; fix the bluez line \
+                 first (start bluetoothd: sudo systemctl start bluetooth)",
                 cli.adapter
             ),
         );
@@ -200,7 +205,11 @@ async fn probe_adapter(cli: &Cli, adapter: Option<&Adapter>) -> CheckLine {
         ),
         Ok(Err(error)) => CheckLine::fail(
             "adapter",
-            format!("could not read Powered for {}: {error}", cli.adapter),
+            format!(
+                "could not read Powered for {}: {error}; restart bluetoothd: \
+                 sudo systemctl restart bluetooth",
+                cli.adapter
+            ),
         ),
         Err(_) => CheckLine::fail(
             "adapter",
@@ -305,7 +314,9 @@ async fn probe_psm(cli: &Cli, adapter: Option<&Adapter>) -> CheckLine {
     let Some(adapter) = adapter else {
         return CheckLine::fail(
             "coc-psm",
-            "not checked: no BlueZ adapter; see the adapter line".into(),
+            "not checked: no BlueZ adapter; fix the adapter check first (restart bluetoothd \
+             or verify the adapter name)"
+                .into(),
         );
     };
     let Some(phone) = phone_address(cli) else {
@@ -347,7 +358,8 @@ async fn probe_psm(cli: &Cli, adapter: Option<&Adapter>) -> CheckLine {
             return CheckLine::fail(
                 "coc-psm",
                 format!(
-                    "timed out after {PROBE_TIMEOUT:?} reading the advertisement from {phone}"
+                    "timed out after {PROBE_TIMEOUT:?} reading the advertisement from {phone}; \
+                     keep the phone unlocked and near this machine"
                 ),
             );
         }

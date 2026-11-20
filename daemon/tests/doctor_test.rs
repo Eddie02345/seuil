@@ -72,8 +72,13 @@ fn doctor_reports_blocking_failures_with_a_next_action() {
     );
     for line in &fail_lines {
         let lower = line.to_ascii_lowercase();
+        let names_action = [
+            "run `", "run ", "rerun ", "setup", "start ", "restart ", "install ", "fix ",
+        ]
+        .iter()
+        .any(|verb| lower.contains(verb));
         assert!(
-            lower.contains("run `") || lower.contains("run ") || lower.contains("setup"),
+            names_action,
             "a failing check must name the next action, got: {line}"
         );
     }
