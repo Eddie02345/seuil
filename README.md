@@ -51,7 +51,7 @@ The wire format, message ids, and field layouts are documented in
 
 | Distribution | Runtime packages | Build packages |
 |---|---|---|
-| Arch | `bluez bluez-utils bluez-deprecated-tools dbus pipewire pipewire-pulse libpulse playerctl` | `base-devel rust` |
+| Arch | `bluez bluez-utils dbus pipewire pipewire-pulse libpulse` | `base-devel rust` |
 | Debian / Ubuntu | `bluez pipewire pipewire-bin pipewire-pulse playerctl libdbus-1-3` | `build-essential pkg-config libdbus-1-dev libssl-dev` |
 | Fedora | `bluez bluez-deprecated pipewire pipewire-utils pipewire-pulseaudio playerctl dbus-libs` | `gcc pkg-config dbus-devel openssl-devel rust cargo` |
 
@@ -62,8 +62,10 @@ the build packages; the per-distribution commands below include both.
 daemon skips that check and warns at startup. It ships in
 `bluez-deprecated-tools` on Arch, `bluez` on Debian/Ubuntu, and
 `bluez-deprecated` on Fedora. SteamOS bluez-utils ships no `sdptool`, and the
-daemon runs without it. `pactl` and `playerctl` are optional too: without them,
-audio activity detection degrades and `seuil doctor` names the degraded source.
+daemon runs without it. `pactl` and `parec` drive audio activity detection:
+without them it degrades, and `seuil doctor` names the degraded source. They
+ship together in `libpulse` on Arch and in `pulseaudio-utils` on Debian/Ubuntu
+and Fedora. `playerctl` is optional for MPRIS control.
 
 Seuil also needs the `bluer` crate's BlueZ backend, which is built from source
 by Cargo.
@@ -72,34 +74,18 @@ by Cargo.
 
 ### Arch Linux
 
-The package is published with each GitHub release as a prebuilt
-`.pkg.tar.zst`, so no AUR account is needed.
-
-#### Prebuilt package
+The Arch packaging lives in the AUR, community-maintained:
+[seuil-git](https://aur.archlinux.org/packages/seuil-git) builds from this
+repository's master branch.
 
 ```sh
-sudo pacman -U https://github.com/Eddie02345/seuil/releases/download/v1.0.1/seuil-1.0.1-1-x86_64.pkg.tar.zst
+paru -S seuil-git        # or: yay -S seuil-git
 seuil setup
 ```
 
-You can also download `seuil-<version>-1-x86_64.pkg.tar.zst` from the
-[releases page](https://github.com/Eddie02345/seuil/releases) and install it
-with `sudo pacman -U <file>`.
-
-#### Build from source
-
-```sh
-sudo pacman -S --needed base-devel pkg-config dbus bluez bluez-utils \
-    bluez-deprecated-tools pipewire pipewire-pulse libpulse playerctl rust
-git clone https://github.com/Eddie02345/seuil.git
-cd seuil/packaging/aur
-makepkg -si
-seuil setup
-```
-
-AUR publishing (`paru -S seuil`, `yay -S seuil`) is queued until new AUR
-account registration reopens. The package recipe in `packaging/aur` is already
-ready and builds the same binary the release asset contains.
+The portable prebuilt artifact also works on Arch without a package manager:
+download the installer and run `bash install.sh --from-release`, which
+installs into `~/.local/bin` (see the Steam Deck section for the full path).
 
 ### Debian / Ubuntu
 
