@@ -308,17 +308,24 @@ impl BleKeyDerivation {
     }
 
     /// Reverse [`Self::obfuscate`]. XOR is symmetric.
-    pub fn deobfuscate(&self, payload: &mut [u8], header_bytes: &[u8]) {
-        self.xor_table(payload, header_bytes);
+    ///
+    /// [FR-008] Returns whether the payload had a known layout and was
+    /// deobfuscated, so callers never parse an untouched payload as if the
+    /// obfuscation had been removed.
+    pub fn deobfuscate(&self, payload: &mut [u8], header_bytes: &[u8]) -> bool {
+        self.xor_table(payload, header_bytes)
     }
 
     /// XOR the SHA-256 table into the payload from the account LTV onward.
-    fn xor_table(&self, payload: &mut [u8], header_bytes: &[u8]) {
+    ///
+    /// Returns `false` when no key is configured or the packet layout is
+    /// unknown, leaving the payload untouched.
+    fn xor_table(&self, payload: &mut [u8], header_bytes: &[u8]) -> bool {
         if !self.is_configured() {
-            return;
+            return false;
         }
         let Some((header_start, header_len, xor_start)) = xor_layout(payload) else {
-            return;
+            return false;
         };
 
         let mut offset = 0u8;
@@ -336,6 +343,7 @@ impl BleKeyDerivation {
         for (idx, byte) in payload.iter_mut().enumerate().skip(xor_start) {
             *byte ^= self.sha256_table[(pad + idx) % self.sha256_table.len()];
         }
+        true
     }
 
     /// Whether a fingerprint was supplied.

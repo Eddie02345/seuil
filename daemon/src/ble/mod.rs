@@ -4,14 +4,17 @@ use anyhow::{Context, Result};
 use bluer::{Adapter, AddressType};
 use futures::StreamExt;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::auth::ble_keys::{AccountRole, BleKeyDerivation};
 use crate::auth::{Credentials, normalize_bt_address};
-use crate::protocol::{AudioState, BleHeader, DeviceContext, DeviceType, SAMSUNG_COMPANY_ID};
+use crate::protocol::{
+    AudioState, BleHeader, DeviceContext, DeviceType, resolve_format_offset, SAMSUNG_COMPANY_ID,
+};
 
 pub mod coc_session;
 pub mod l2cap;
@@ -44,6 +47,9 @@ pub enum AdvUpdate {
 
 /// Offset where the LTV block starts in an account-bound advertisement.
 const LTV_START: usize = 16;
+
+/// Offset of the checksum byte in a Samsung manufacturer-data payload.
+const CHECKSUM_OFFSET: usize = 2;
 
 /// LTV record type 1: device context carrying the CoC PSM.
 const LTV_TYPE_COC: u8 = 1;
@@ -120,12 +126,28 @@ pub fn parse_mcf_manufacturer_data(
         return None;
     }
 
+    // [FR-008] The format byte validates at offset 3 or, in the alternate
+    // reading, at offset 2. Reject only when neither reading validates.
+    let Some(format_offset) = resolve_format_offset(data) else {
+        debug!(
+            len = data.len(),
+            "No Samsung format byte at offsets {PRIMARY} or {ALTERNATE}",
+            PRIMARY = crate::protocol::FORMAT_BYTE_OFFSET_PRIMARY,
+            ALTERNATE = crate::protocol::FORMAT_BYTE_OFFSET_ALTERNATE
+        );
+        return None;
+    };
+    debug!(format_offset, "Resolved the Samsung format byte");
+
     let mut device_type = DeviceType::from((data[3] & 0xF0) >> 4);
     if matches!(device_type, DeviceType::Unknown(0)) && data.len() > 4 {
         device_type = DeviceType::from(data[4] & 0x0F);
     }
 
-    let raw_context = if data.len() >= 14 {
+    // [FR-008] The short format carries the device context from offset 4, so an
+    // 11-byte payload already has the whole context; the audio playback short is
+    // read only when NS bit 2 is set and the bytes are present.
+    let raw_context = if data.len() >= 9 {
         let coc = u16::from_be_bytes([data[4], data[5]]);
         let device_state = data[6];
         let notification_state = data[7];
@@ -178,6 +200,10 @@ pub fn parse_mcf_manufacturer_data(
 ///
 /// The LTV block is XOR-obfuscated with the account's SHA-256 table, so the
 /// payload is deobfuscated on a copy before the records are walked.
+///
+/// [FR-008] A malformed record never aborts the whole walk: zero-length records
+/// are skipped, a record that overruns the buffer ends the walk, and a type 1
+/// record decoded before either fault stays in the result.
 fn parse_type1_ltv(
     data: &[u8],
     keys: &BleKeyDerivation,
@@ -192,9 +218,20 @@ fn parse_type1_ltv(
         return None;
     }
 
-    let mut clear = data.to_vec();
-    keys.deobfuscate(&mut clear, &[]);
+    // Offset 3 bit 7 marks the extended format, which has no inline account
+    // LTV block. Walking it would read bytes with the wrong XOR start.
+    if data.get(3).is_some_and(|flags| flags & 0x80 != 0) {
+        debug!("Skipping the account-bound LTV walk: extended-format advertisement without an inline account LTV");
+        return None;
+    }
 
+    let mut clear = data.to_vec();
+    if !keys.deobfuscate(&mut clear, &[]) {
+        debug!("Skipping the account-bound LTV walk: unknown obfuscation layout");
+        return None;
+    }
+
+    let mut decoded = None;
     let mut index = LTV_START;
     while index < clear.len() {
         let header = clear[index];
@@ -203,16 +240,27 @@ fn parse_type1_ltv(
         let body_start = index + 1;
         let body_end = body_start + length;
 
-        // A zero length or a record that overruns the buffer ends parsing.
-        if length == 0 || body_end > clear.len() {
-            return None;
+        if length == 0 {
+            // Recoverable: a zero-length record carries no body. Step past its
+            // header so the walk reaches the next record.
+            debug!(index, "Skipping a zero-length LTV record");
+            index += 1;
+            continue;
+        }
+        if body_end > clear.len() {
+            // Unrecoverable: the declared length runs past the buffer. End the
+            // walk and keep whatever was decoded so far.
+            debug!(
+                index,
+                length,
+                len = clear.len(),
+                "LTV record overruns the buffer; ending the walk"
+            );
+            break;
         }
 
-        if kind == LTV_TYPE_COC {
+        if kind == LTV_TYPE_COC && decoded.is_none() && length >= 2 {
             // Type 1 carries the CoC PSM as a big-endian short.
-            if length < 2 {
-                return None;
-            }
             let coc = u16::from_be_bytes([clear[body_start], clear[body_start + 1]]);
             if length >= 5 {
                 let device_state = clear[body_start + 2];
@@ -235,20 +283,29 @@ fn parse_type1_ltv(
                     || (notification_state & 0x40) != 0
                 {
                     AudioState::Streaming
-                } else if (notification_state & 0xF8) == NS_AUDIO_IDLE || notification_state != 0 {
+                } else if (notification_state & 0xF8) == NS_AUDIO_IDLE
+                    || notification_state != 0
+                {
                     AudioState::Idle
                 } else {
                     AudioState::Disconnected
                 };
-                return Some((coc, Some(ctx), Some(audio_state)));
+                decoded = Some((coc, Some(ctx), Some(audio_state)));
+            } else {
+                decoded = Some((coc, None, None));
             }
-            return Some((coc, None, None));
         }
 
         index = body_end;
     }
 
-    None
+    decoded
+}
+
+/// [FR-011] Whether the advertisement checksum at offset 2 matches the account.
+pub fn advertisement_checksum_matches(data: &[u8], keys: &BleKeyDerivation) -> bool {
+    data.get(CHECKSUM_OFFSET)
+        .is_some_and(|&checksum| keys.checksum_matches(checksum))
 }
 
 /// Derive the scan-side keys used to deobfuscate phone advertisements.
@@ -259,12 +316,24 @@ pub fn scanning_keys(fingerprint: Option<&[u8]>) -> BleKeyDerivation {
     BleKeyDerivation::with_role(fingerprint.unwrap_or_default().to_vec(), AccountRole::Scan)
 }
 
-/// Start BLE scanning for Samsung MCF advertisements
+/// Duplicate-suppression window for unchanged advertisement payloads.
+const DUPLICATE_WINDOW: Duration = Duration::from_secs(15);
+
+/// Restart ceiling for a discovery stream that keeps failing.
+const SCAN_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(15);
+
+/// Start BLE scanning for Samsung MCF advertisements.
+///
+/// [FR-015] Stops any previous discovery session before re-applying the filter,
+/// surfaces a rejected filter as a warning, and keeps per-address bookkeeping
+/// bounded by `peer_limit`. The returned join handle owns the session, so the
+/// lifecycle supervisor can abort it on suspend or adapter loss.
 pub async fn start_ble_scan(
     adapter: Arc<Adapter>,
     tx: mpsc::Sender<BleAdvEvent>,
     keys: BleKeyDerivation,
-) -> Result<()> {
+    peer_limit: usize,
+) -> Result<JoinHandle<()>> {
     info!(
         "Starting BLE scan for Samsung MCF (Company ID 0x{:04X})",
         SAMSUNG_COMPANY_ID
@@ -274,13 +343,16 @@ pub async fn start_ble_scan(
         duplicate_data: true,
         ..Default::default()
     };
+    // [FR-015] One discovery session at a time. The caller drops the previous
+    // discovery stream before calling this, which makes BlueZ run StopDiscovery;
+    // re-applying the filter then starts exactly one new session.
     if let Err(e) = adapter.set_discovery_filter(filter.clone()).await {
-        debug!("Could not set BLE discovery filter: {e}");
+        warn!("BlueZ rejected the BLE discovery filter; continuing unfiltered: {e}");
     }
 
     let initial_stream = adapter.discover_devices_with_changes().await?;
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let mut stream_opt = Some(initial_stream);
         let mut backoff = Duration::from_secs(2);
         let mut last_seen: std::collections::HashMap<
@@ -293,7 +365,15 @@ pub async fn start_ble_scan(
                 Some(s) => s,
                 None => {
                     tokio::time::sleep(backoff).await;
-                    let _ = adapter.set_discovery_filter(filter.clone()).await;
+                    // [FR-015] The previous stream is dropped before the sleep,
+                    // so its discovery session has stopped before the filter is
+                    // re-applied here.
+                    if let Err(error) = adapter.set_discovery_filter(filter.clone()).await {
+                        warn!(
+                            "BlueZ rejected the BLE discovery filter on restart; continuing \
+                             unfiltered: {error}"
+                        );
+                    }
                     match adapter.discover_devices_with_changes().await {
                         Ok(s) => {
                             debug!("Re-established BLE discovery stream");
@@ -302,7 +382,7 @@ pub async fn start_ble_scan(
                         }
                         Err(e) => {
                             debug!("BLE discovery restart delayed ({e}); backing off");
-                            backoff = (backoff * 2).min(Duration::from_secs(15));
+                            backoff = (backoff * 2).min(SCAN_RESTART_MAX_BACKOFF);
                             continue;
                         }
                     }
@@ -328,7 +408,7 @@ pub async fn start_ble_scan(
                 let payload_changed = match last_seen.get(&key) {
                     Some((prev_bytes, prev_time)) => {
                         if prev_bytes == samsung_data
-                            && now.duration_since(*prev_time) < Duration::from_secs(15)
+                            && now.duration_since(*prev_time) < DUPLICATE_WINDOW
                         {
                             continue;
                         }
@@ -336,6 +416,15 @@ pub async fn start_ble_scan(
                     }
                     None => true,
                 };
+                // [FR-012] Cap the duplicate gate so rotating spoofed addresses
+                // cannot grow it without bound.
+                if last_seen.len() >= peer_limit {
+                    last_seen
+                        .retain(|_, (_, seen)| now.duration_since(*seen) < DUPLICATE_WINDOW);
+                    if last_seen.len() >= peer_limit {
+                        last_seen.clear();
+                    }
+                }
                 last_seen.insert(key, (samsung_data.clone(), now));
 
                 debug!(
@@ -398,7 +487,7 @@ pub async fn start_ble_scan(
         }
     });
 
-    Ok(())
+    Ok(handle)
 }
 
 /// Reads the phone's current CoC PSM from its BlueZ advertisement data.
@@ -457,14 +546,14 @@ pub async fn advertiser_task(
     let bt_address = load_bt_address()?;
     let mut audio_state = AudioState::Idle;
     let mut buds: Option<BudsAdRecord> = None;
-    let mut handle = advertise_account(
+    let mut handle = register_with_backoff(
         adapter.clone(),
         &key_derivation,
         audio_state,
         bt_address,
         buds,
     )
-    .await?;
+    .await;
     info!(?audio_state, "BLE advertisement started");
 
     let rotation_period = Duration::from_secs(43_200);
@@ -480,14 +569,14 @@ pub async fn advertiser_task(
 
                 // Drop the old registration before advertising the replacement.
                 drop(handle);
-                handle = advertise_account(
+                handle = register_with_backoff(
                     adapter.clone(),
                     &key_derivation,
                     audio_state,
                     bt_address,
                     buds,
                 )
-                .await?;
+                .await;
                 info!(rotated, "BLE advertisement rotation refreshed");
             }
             next_update = update_rx.recv() => {
@@ -513,20 +602,55 @@ pub async fn advertiser_task(
 
                 // Drop the old registration before advertising the replacement.
                 drop(handle);
-                handle = advertise_account(
+                handle = register_with_backoff(
                     adapter.clone(),
                     &key_derivation,
                     audio_state,
                     bt_address,
                     buds,
                 )
-                .await?;
+                .await;
                 info!(?audio_state, ?buds, rotated, "BLE advertisement updated");
             }
         }
     }
 
     Ok(())
+}
+
+/// Register an advertisement, retrying with capped backoff on failure.
+///
+/// [FR-015] A registration collision (the previous advertisement is still
+/// unregistering) must not end advertising for the process lifetime, so this
+/// loop keeps the task alive instead of returning the error.
+async fn register_with_backoff(
+    adapter: Arc<Adapter>,
+    key_derivation: &BleKeyDerivation,
+    audio_state: AudioState,
+    bt_address: [u8; 6],
+    buds: Option<BudsAdRecord>,
+) -> bluer::adv::AdvertisementHandle {
+    let mut delay = Duration::from_secs(1);
+    loop {
+        match advertise_account(
+            adapter.clone(),
+            key_derivation,
+            audio_state,
+            bt_address,
+            buds,
+        )
+        .await
+        {
+            Ok(handle) => return handle,
+            Err(error) => {
+                warn!(
+                    "BLE advertisement registration failed ({error:#}); retrying in {delay:?}"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(60));
+            }
+        }
+    }
 }
 
 /// Load the local Bluetooth address used by the type 4 LTV hint.
@@ -547,16 +671,21 @@ fn parse_bt_address(address: &str) -> Result<[u8; 6]> {
     Ok(bytes)
 }
 
-/// Register the advertisement and keep its handle alive for the process.
+/// Advertisement handles kept alive for the process.
 ///
-/// Dropping `AdvertisementHandle` unregisters the advertisement, so the handle
-/// is moved into a task that never completes.
+/// Dropping `AdvertisementHandle` unregisters the advertisement, so it must
+/// outlive the call that registered it. A registry keeps the handle alive
+/// without spawning a never-completing task per call.
+static HELD_ADVERTISEMENTS: LazyLock<std::sync::Mutex<Vec<bluer::adv::AdvertisementHandle>>> =
+    LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Register the advertisement and keep its handle alive for the process.
 #[allow(dead_code)] // Shared by the two public start functions above.
 fn hold_advertisement(handle: bluer::adv::AdvertisementHandle) {
-    tokio::spawn(async move {
-        let _handle = handle;
-        std::future::pending::<()>().await;
-    });
+    match HELD_ADVERTISEMENTS.lock() {
+        Ok(mut held) => held.push(handle),
+        Err(poisoned) => poisoned.into_inner().push(handle),
+    }
 }
 
 /// Register a manufacturer data payload with the local adapter.
@@ -951,3 +1080,4 @@ mod tests {
         assert_eq!(&scr[17..19], &COC.to_be_bytes());
     }
 }
+

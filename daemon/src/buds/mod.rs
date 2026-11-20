@@ -66,6 +66,9 @@ pub fn parse_extended_status_update(payload: &[u8]) -> Option<BudsConnection> {
     })
 }
 
+/// Smallest valid declared size: one message-id byte plus the two CRC bytes.
+const MIN_DECLARED_SIZE: usize = 3;
+
 /// Parse a received SPP frame
 pub fn parse_frame(data: &[u8]) -> Option<(u8, Vec<u8>)> {
     if data.len() < 5 {
@@ -80,6 +83,14 @@ pub fn parse_frame(data: &[u8]) -> Option<(u8, Vec<u8>)> {
     let header = u16::from_le_bytes([data[1], data[2]]);
     let size = (header & buds_spp::SIZE_MASK) as usize;
     let _is_from_earbuds = header & buds_spp::TYPE_BIT != 0;
+
+    // [FR-013] The declared size covers the message id and the CRC, so sizes
+    // under 3 leave no room for a payload slice and must be rejected before any
+    // index arithmetic, never panicking.
+    if size < MIN_DECLARED_SIZE {
+        warn!("Frame declares an invalid size {} (minimum {MIN_DECLARED_SIZE})", size);
+        return None;
+    }
 
     if data.len() < 1 + 2 + size + 1 {
         warn!("Frame too short for size {}", size);

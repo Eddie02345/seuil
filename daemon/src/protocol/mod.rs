@@ -26,6 +26,30 @@ pub struct BleHeader {
     pub flags: u8,   // Byte 2: bit 7 = extended adv, bit 6 = secondary, lower 4 = sub-type
 }
 
+/// Offset of the format byte in the daemon's primary reading.
+pub const FORMAT_BYTE_OFFSET_PRIMARY: usize = 3;
+/// Offset of the format byte in the alternate (original-findings) reading.
+pub const FORMAT_BYTE_OFFSET_ALTERNATE: usize = 2;
+
+/// Low-nibble format flags: `0x00` long format, `0x01` short address format.
+const FORMAT_NIBBLE_MASK: u8 = 0x0F;
+const FORMAT_LONG: u8 = 0x00;
+const FORMAT_SHORT: u8 = 0x01;
+
+/// Returns the offset carrying a Samsung format byte, primary reading first.
+///
+/// [FR-008] Advertisements are reported with the format byte at offset 3 or,
+/// in the original findings, at offset 2. The primary reading wins; callers
+/// reject only when neither byte validates.
+pub fn resolve_format_offset(data: &[u8]) -> Option<usize> {
+    [FORMAT_BYTE_OFFSET_PRIMARY, FORMAT_BYTE_OFFSET_ALTERNATE]
+        .into_iter()
+        .find(|&offset| {
+            data.get(offset)
+                .is_some_and(|byte| matches!(byte & FORMAT_NIBBLE_MASK, FORMAT_LONG | FORMAT_SHORT))
+        })
+}
+
 impl BleHeader {
     pub const EXPECTED_VERSION: u8 = 0x02;
     pub const EXPECTED_SUBTYPE: u8 = 0x18;

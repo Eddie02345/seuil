@@ -9,7 +9,7 @@ readme = "../README.md"
 
 [dependencies]
 # Bluetooth
-bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
+bluer = { version = "0.17", features = ["bluetoothd", "l2cap", "rfcomm"] }
 # D-Bus
 zbus = { version = "5", features = ["tokio"] }
 # Async runtime

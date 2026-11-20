@@ -41,6 +41,24 @@ pub const COMMAND_GET_DEVICE_STATE: u64 = 5;
 /// command resets its timer, so the get-device-state
 /// query keeps the channel open without changing any state.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Timeout bounds for one command channel, from config.toml.
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelTimeouts {
+    /// Upper bound on a keepalive write.
+    pub keepalive: Duration,
+    /// Upper bound on a frame send, and the floor of the inbound read window.
+    pub frame: Duration,
+}
+
+impl Default for ChannelTimeouts {
+    fn default() -> Self {
+        Self {
+            keepalive: Duration::from_secs(10),
+            frame: Duration::from_secs(10),
+        }
+    }
+}
 /// BUDS_SWITCH command id.
 pub const COMMAND_BUDS_SWITCH: u64 = 1;
 /// Keep-alive "ready" event command id.
@@ -155,6 +173,18 @@ pub fn decode_incoming(command: &McfCommand) -> Option<IncomingCommand> {
     }
 }
 
+/// Bound on the wait for the next inbound frame, measured from the last one.
+///
+/// [FR-012] A peer that answers keepalives is live even when it has no Auto
+/// Switch traffic to send, so the inbound deadline must outlast a full
+/// keepalive cycle instead of restarting on every unrelated branch. One cycle
+/// plus the larger configured timeout keeps a keepalive-only channel open at
+/// the defaults (25 s) while still bounding a peer that stops answering or
+/// stalls mid-frame.
+fn inbound_frame_deadline(keepalive: Duration, frame: Duration) -> Duration {
+    KEEPALIVE_INTERVAL + keepalive.max(frame)
+}
+
 /// Runs the command channel until the transport closes.
 ///
 /// Sends the ready event immediately, then serves outgoing requests and
@@ -166,6 +196,7 @@ pub async fn run_command_channel(
     peer: String,
     mut outgoing: mpsc::Receiver<CommandRequest>,
     incoming: mpsc::Sender<(String, IncomingCommand)>,
+    timeouts: ChannelTimeouts,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut sequence = 0u64;
@@ -179,20 +210,40 @@ pub async fn run_command_channel(
     // one interval after the ready event.
     keepalive.tick().await;
 
+    // [FR-012] The inbound deadline counts from the last received frame, not
+    // from the last select iteration, so a keepalive write does not reset it.
+    let inbound_deadline = inbound_frame_deadline(timeouts.keepalive, timeouts.frame);
+    let mut last_inbound = tokio::time::Instant::now();
+
     loop {
+        let next_inbound = last_inbound + inbound_deadline;
         tokio::select! {
             _ = keepalive.tick() => {
-                if let Err(error) =
-                    send_command(&mut writer, &session_key, &mut sequence, HANDLER_AUTO_SWITCH, COMMAND_GET_DEVICE_STATE, TYPE_REQUEST, Vec::new())
-                        .await
-                {
-                    warn!("keepalive send failed: {error:#}");
-                    break;
+                // [FR-012] A peer that stops draining keepalive writes tears
+                // the channel down instead of stalling the task forever.
+                let sent = tokio::time::timeout(
+                    timeouts.keepalive,
+                    send_command(&mut writer, &session_key, &mut sequence, HANDLER_AUTO_SWITCH, COMMAND_GET_DEVICE_STATE, TYPE_REQUEST, Vec::new()),
+                )
+                .await;
+                match sent {
+                    Err(_) => {
+                        warn!(
+                            timeout = ?timeouts.keepalive,
+                            "keepalive write timed out; tearing down the command channel"
+                        );
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        warn!("keepalive send failed: {error:#}");
+                        break;
+                    }
+                    Ok(Ok(())) => {}
                 }
             }
             request = outgoing.recv() => {
                 let Some(request) = request else { break };
-                let result = match request {
+                let send = match request {
                     CommandRequest::BudsSwitch { adv_id, address, reason } => {
                         let body = switch_request_body(adv_id, address, reason);
                         send_command(
@@ -204,7 +255,6 @@ pub async fn run_command_channel(
                             TYPE_REQUEST,
                             body,
                         )
-                        .await
                     }
                     CommandRequest::SwitchResponse { result, adv_id, address } => {
                         let body = switch_response_body(result, adv_id, address);
@@ -217,20 +267,43 @@ pub async fn run_command_channel(
                             TYPE_RESPONSE,
                             body,
                         )
-                        .await
                     }
                 };
-                if let Err(error) = result {
-                    warn!("command send failed: {error:#}");
-                    break;
+                let result = tokio::time::timeout(timeouts.frame, send).await;
+                match result {
+                    Err(_) => {
+                        warn!(
+                            timeout = ?timeouts.frame,
+                            "command send timed out; tearing down the command channel"
+                        );
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        warn!("command send failed: {error:#}");
+                        break;
+                    }
+                    Ok(Ok(())) => {}
                 }
+            }
+            _ = tokio::time::sleep_until(next_inbound) => {
+                // [FR-012] A peer that has not answered within a full keepalive
+                // cycle plus the configured timeout is stalled; the caller
+                // removes the channel map entry.
+                warn!(
+                    window = ?inbound_deadline,
+                    "no inbound command within the idle window; tearing down the command channel"
+                );
+                break;
             }
             frame = read_frame(&mut reader) => {
                 let frame = match frame {
-                    Ok(frame) => frame,
                     Err(error) => {
                         debug!("command channel closed: {error:#}");
                         break;
+                    }
+                    Ok(frame) => {
+                        last_inbound = tokio::time::Instant::now();
+                        frame
                     }
                 };
                 let packet = match parse_frame(&frame) {
@@ -356,6 +429,24 @@ mod tests {
     use super::*;
 
     const BUDS: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+
+    #[test]
+    fn inbound_frame_deadline_outlasts_one_keepalive_cycle() {
+        // Defaults: a keepalive-only channel is never torn down by the read
+        // bound, because the phone's reply resets it every 15 s.
+        let default = inbound_frame_deadline(Duration::from_secs(10), Duration::from_secs(10));
+        assert_eq!(default, Duration::from_secs(25));
+        assert!(default > KEEPALIVE_INTERVAL);
+        // Each configured timeout sets the floor of the window.
+        assert_eq!(
+            inbound_frame_deadline(Duration::from_secs(20), Duration::from_secs(10)),
+            Duration::from_secs(35)
+        );
+        assert_eq!(
+            inbound_frame_deadline(Duration::from_secs(5), Duration::from_secs(30)),
+            Duration::from_secs(45)
+        );
+    }
 
     #[test]
     fn advertisement_id_is_xor_high_byte_and_last_byte_low() {
