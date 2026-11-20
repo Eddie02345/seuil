@@ -327,7 +327,11 @@ mod tests {
 
     #[test]
     fn config_dir_honours_the_override() {
-        // The variable is process-wide, so only assert the naming contract.
+        // The variable is process-wide, so only assert the naming contract
+        // when no override is active (a test harness may preset it).
+        if std::env::var_os("MCFDS_CONFIG_DIR").is_some() {
+            return;
+        }
         let dir = config_dir();
         assert!(dir.ends_with("seuil"));
     }

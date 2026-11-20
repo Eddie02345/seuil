@@ -27,6 +27,38 @@ use auth::Credentials;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Holds the env lock for one test and restores `MCFDS_CONFIG_DIR` on drop,
+/// so a scratch directory never leaks into later tests in this binary,
+/// including the included modules' inline tests.
+struct EnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl EnvGuard {
+    fn acquire() -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("MCFDS_CONFIG_DIR");
+        Self {
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // The lock is still held here: struct fields drop after Drop::drop.
+        unsafe {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("MCFDS_CONFIG_DIR", previous);
+            } else {
+                std::env::remove_var("MCFDS_CONFIG_DIR");
+            }
+        }
+    }
+}
+
 /// Points `MCFDS_CONFIG_DIR` at a fresh scratch directory.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("seuil-cred-test-{name}-{}", std::process::id()));
@@ -91,7 +123,7 @@ fn save_valid(dir: &std::path::Path) -> PathBuf {
 // fails naming the key file and no new key is written.
 #[test]
 fn deleted_key_fails_load_and_is_not_regenerated() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = EnvGuard::acquire();
     let dir = scratch("deleted-key");
     let key = save_valid(&dir);
     std::fs::remove_file(&key).unwrap();
@@ -113,7 +145,7 @@ fn deleted_key_fails_load_and_is_not_regenerated() {
 // whose length is not 32 bytes fails loading naming the mismatch.
 #[test]
 fn wrong_length_key_fails_load() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = EnvGuard::acquire();
     let dir = scratch("wrong-length");
     let key = save_valid(&dir);
     std::fs::write(&key, vec![0u8; 31]).unwrap();
@@ -134,7 +166,7 @@ fn wrong_length_key_fails_load() {
 #[test]
 fn unreadable_key_fails_load_and_is_not_rewritten() {
     use std::os::unix::fs::PermissionsExt;
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = EnvGuard::acquire();
     let dir = scratch("unreadable");
     let key = save_valid(&dir);
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -156,7 +188,7 @@ fn unreadable_key_fails_load_and_is_not_rewritten() {
 // manual cleanup and the envelope stays decryptable.
 #[test]
 fn stale_temp_file_does_not_block_the_next_save() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = EnvGuard::acquire();
     let dir = scratch("stale-temp");
     save_valid(&dir);
     std::fs::write(dir.join("credentials.json.tmp-stale"), b"garbage").unwrap();
@@ -176,7 +208,7 @@ fn stale_temp_file_does_not_block_the_next_save() {
 // save, overwrite, reload, decrypt.
 #[test]
 fn repeated_saves_keep_the_envelope_decryptable() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = EnvGuard::acquire();
     let dir = scratch("crash-approx");
     save_valid(&dir);
     let first = Credentials::load().expect("first load").expect("envelope");
@@ -207,7 +239,7 @@ fn debug_formatting_redacts_all_secret_fields() {
 // paths around load/save must not leak the key or token values.
 #[test]
 fn load_error_paths_print_no_secret_material() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env_guard = EnvGuard::acquire();
     let dir = scratch("secrecy-errors");
     let c = secret_credentials();
     c.save().expect("save");
